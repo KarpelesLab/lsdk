@@ -55,9 +55,11 @@ Everything is behind cargo features:
 | `hsm` | HSM secure channel (websocket; tokio-tungstenite natively, `WebSocket` in the browser) |
 | `manager` | genuine check, app install / uninstall, firmware update (`manager-api` + `hsm`) |
 | `attestation` | offline genuine check: device attestation verified locally against pinned issuer keys |
+| `scp` | dashboard secure channel: secure commands, custom CA management |
+| `loader` | app images from ELF / Intel HEX, sideloading through the secure channel |
 | `eth`, `btc`, `sol`, `apps` | app clients; transactions generated with outscript |
 | `serde` | serde derives on public types |
-| `full` | `hid` + `manager` + `apps` + `attestation` |
+| `full` | `hid` + `manager` + `apps` + `attestation` + `scp` + `loader` |
 | `wasm` | JS bindings used by the web console |
 | `cli` | the `lsdk` command line tool |
 
@@ -129,6 +131,28 @@ lsdk eth sign-tx --nonce 0 --to 0x... --value 0.01 --max-fee 30
 lsdk btc address --kind taproot --display
 lsdk sol transfer --to ... --amount 0.1 --blockhash ...
 ```
+
+### Sideloading apps (app development)
+
+The device only installs apps from its vendor, or from a **custom CA** you
+install once. With `lsdk`:
+
+```sh
+lsdk ca keygen                           # once: CA key in ~/.config/lsdk/ca.key (0600)
+lsdk ca install --name "dev"             # once, with the device in recovery mode
+lsdk app load build/nanos2/bin/app.elf   # after every build (replaces the previous one)
+lsdk app list | lsdk app delete "My App" | lsdk meminfo
+```
+
+`app load` reads everything from the ELF built by the C or Rust SDK (name,
+version, flags, API level, target id, NVRAM and install parameters sizes): no
+manifest, no Python. The app's API level must match the firmware's (e.g.
+API level 27 for Nano S Plus 1.7.0); `--dry-run` shows what would be sent.
+Intel HEX files work too, with `--name`, `--flags`, `--api-level`,
+`--data-size` and `--install-params-size`.
+
+Recovery mode: hold the right button while plugging in (Nano S Plus) or
+powering on (Nano X). `lsdk ca remove` deletes the CA.
 
 ### Linux: udev rules
 
