@@ -1,17 +1,26 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { state } from '../lib/store.js'
 import EthPanel from './advanced/EthPanel.vue'
 import BtcPanel from './advanced/BtcPanel.vue'
 import SolPanel from './advanced/SolPanel.vue'
 import ApduPanel from './advanced/ApduPanel.vue'
+import ScreensaverPanel from './advanced/ScreensaverPanel.vue'
 
 const panels = [
   { id: 'eth', label: 'Ethereum / EVM', comp: EthPanel },
   { id: 'btc', label: 'Bitcoin', comp: BtcPanel },
   { id: 'sol', label: 'Solana', comp: SolPanel },
+  { id: 'screensaver', label: 'Screensaver', comp: ScreensaverPanel },
   { id: 'apdu', label: 'Raw APDU', comp: ApduPanel },
 ]
 const sel = ref('eth')
+// In recovery mode, the screensaver is what can be done here.
+watch(
+  () => state.info?.version?.flags?.isInRecoveryMode,
+  (rec) => { if (rec) sel.value = 'screensaver' },
+  { immediate: true },
+)
 </script>
 
 <template>

@@ -2,7 +2,10 @@
 
 use crate::apdu::{Apdu, Response, StatusWord};
 use crate::error::{Error, Result};
-use crate::os::{self, AppAndVersion, BatteryStatus, BatteryStatusKind, InstalledApp, OsVersion};
+use crate::os::{
+    self, AppAndVersion, BatteryStatus, BatteryStatusKind, InstalledApp, OsVersion, ScreenSaver,
+    ScreenSaverAnimation, ScreenSaverSpeed,
+};
 use crate::transport::Transport;
 
 /// A device reachable through a [`Transport`].
@@ -127,6 +130,55 @@ impl<T: Transport> Device<T> {
             StatusWord::OK => Ok(()),
             sw if sw.is_refused() => Err(Error::UserRefused),
             sw => Err(sw.into()),
+        }
+    }
+
+    fn screen_saver_err(sw: StatusWord) -> Error {
+        match sw {
+            sw if sw.is_refused() => Error::UserRefused,
+            // The dashboard answers "unknown instruction" outside recovery mode.
+            StatusWord(0x6d00..=0x6dff) => Error::App(
+                "the screensaver can only be changed in recovery mode (Nano X / Nano S Plus)"
+                    .into(),
+            ),
+            sw => sw.into(),
+        }
+    }
+
+    /// Current custom screensaver, `None` for the default one. Recovery mode only.
+    pub async fn get_screen_saver(&self) -> Result<Option<ScreenSaver>> {
+        let r = self.exchange(&os::get_screen_saver()).await?;
+        if !r.sw.is_ok() {
+            return Err(Self::screen_saver_err(r.sw));
+        }
+        ScreenSaver::parse(&r.data)
+    }
+
+    /// Set a custom scrolling-text screensaver (user confirmation required).
+    /// Recovery mode only.
+    pub async fn set_screen_saver(
+        &self,
+        text: &str,
+        animation: ScreenSaverAnimation,
+        speed: ScreenSaverSpeed,
+    ) -> Result<()> {
+        let r = self
+            .exchange(&os::set_screen_saver(text, animation, speed)?)
+            .await?;
+        if r.sw.is_ok() {
+            Ok(())
+        } else {
+            Err(Self::screen_saver_err(r.sw))
+        }
+    }
+
+    /// Restore the default screensaver (user confirmation required). Recovery mode only.
+    pub async fn reset_screen_saver(&self) -> Result<()> {
+        let r = self.exchange(&os::reset_screen_saver()).await?;
+        if r.sw.is_ok() {
+            Ok(())
+        } else {
+            Err(Self::screen_saver_err(r.sw))
         }
     }
 

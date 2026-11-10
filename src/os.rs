@@ -32,6 +32,151 @@ pub fn get_battery_status(kind: BatteryStatusKind) -> Apdu {
     Apdu::new(0xe0, 0x10, 0x00, kind as u8)
 }
 
+/// `SET_SCREEN_SAVER` instruction (recovery mode only).
+pub const INS_SET_SCREEN_SAVER: u8 = 0xd6;
+const SCREEN_SAVER_MAGIC: &[u8] = b"Screensaver Perso";
+
+fn screen_saver_magic() -> Vec<u8> {
+    let mut v = vec![0x01, SCREEN_SAVER_MAGIC.len() as u8];
+    v.extend_from_slice(SCREEN_SAVER_MAGIC);
+    v
+}
+
+/// Build `SET_SCREEN_SAVER` (custom scrolling text).
+pub fn set_screen_saver(
+    text: &str,
+    animation: ScreenSaverAnimation,
+    speed: ScreenSaverSpeed,
+) -> Result<Apdu> {
+    if text.is_empty() || text.len() > 52 || !text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return Err(Error::InvalidInput(
+            "screensaver text must be 1 to 52 printable ASCII characters".into(),
+        ));
+    }
+    let mut data = screen_saver_magic();
+    data.push(0x02);
+    data.push(text.len() as u8);
+    data.extend_from_slice(text.as_bytes());
+    Ok(Apdu::with_data(
+        0xe0,
+        INS_SET_SCREEN_SAVER,
+        0x00,
+        ((animation as u8) << 4) | speed as u8,
+        data,
+    ))
+}
+
+/// Build `SET_SCREEN_SAVER` (reset to the default screensaver).
+pub fn reset_screen_saver() -> Apdu {
+    Apdu::with_data(0xe0, INS_SET_SCREEN_SAVER, 0x80, 0x00, screen_saver_magic())
+}
+
+/// Build `SET_SCREEN_SAVER` (read the current setting).
+pub fn get_screen_saver() -> Apdu {
+    Apdu::with_data(0xe0, INS_SET_SCREEN_SAVER, 0x40, 0x00, screen_saver_magic())
+}
+
+/// Screensaver text scrolling animation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[repr(u8)]
+pub enum ScreenSaverAnimation {
+    /// Scrolls back and forth.
+    Classic = 0,
+    /// Loops right to left.
+    CircleRightToLeft = 1,
+    /// Loops left to right.
+    CircleLeftToRight = 2,
+}
+
+/// Screensaver animation speed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[repr(u8)]
+pub enum ScreenSaverSpeed {
+    Fast = 0,
+    Normal = 1,
+    Slow = 2,
+}
+
+impl ScreenSaverAnimation {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        [
+            Self::Classic,
+            Self::CircleRightToLeft,
+            Self::CircleLeftToRight,
+        ]
+        .into_iter()
+        .find(|x| *x as u8 == v)
+    }
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "classic" | "0" => Self::Classic,
+            "circle-rl" | "circlerighttoleft" | "rl" | "1" => Self::CircleRightToLeft,
+            "circle-lr" | "circlelefttoright" | "lr" | "2" => Self::CircleLeftToRight,
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "unknown animation {s:?} (classic, circle-rl, circle-lr)"
+                )));
+            }
+        })
+    }
+}
+
+impl ScreenSaverSpeed {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        [Self::Fast, Self::Normal, Self::Slow]
+            .into_iter()
+            .find(|x| *x as u8 == v)
+    }
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(match s.to_ascii_lowercase().as_str() {
+            "fast" | "0" => Self::Fast,
+            "normal" | "1" => Self::Normal,
+            "slow" | "2" => Self::Slow,
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "unknown speed {s:?} (fast, normal, slow)"
+                )));
+            }
+        })
+    }
+}
+
+/// A custom screensaver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct ScreenSaver {
+    pub text: String,
+    pub animation: Option<ScreenSaverAnimation>,
+    pub speed: Option<ScreenSaverSpeed>,
+}
+
+impl ScreenSaver {
+    /// Parse a status response: empty for the default screensaver, else
+    /// `type(1) speed(1) len(1) text [0]`.
+    pub fn parse(data: &[u8]) -> Result<Option<Self>> {
+        if data.len() < 3 {
+            return Ok(None);
+        }
+        let len = (data[2] as usize).min(data.len() - 3);
+        let text = String::from_utf8_lossy(&data[3..3 + len])
+            .trim_end_matches('\0')
+            .to_string();
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            text,
+            animation: ScreenSaverAnimation::from_u8(data[0]),
+            speed: ScreenSaverSpeed::from_u8(data[1]),
+        }))
+    }
+}
+
 /// Names reported by `GET_APP_AND_VERSION` while on the dashboard.
 pub fn is_dashboard_name(name: &str) -> bool {
     name == "BOLOS" || name == "OLOS\0"
@@ -411,6 +556,33 @@ mod tests {
         let a = AppAndVersion::parse(&d).unwrap();
         assert!(a.is_dashboard());
         assert_eq!(a.version, "1.4.1");
+    }
+
+    #[test]
+    fn screen_saver() {
+        let a = set_screen_saver(
+            "Hello",
+            ScreenSaverAnimation::CircleRightToLeft,
+            ScreenSaverSpeed::Slow,
+        )
+        .unwrap();
+        assert_eq!(a.p2, 0x12);
+        assert_eq!(&a.data[..19], b"\x01\x11Screensaver Perso");
+        assert_eq!(&a.data[19..], b"\x02\x05Hello");
+        assert!(
+            set_screen_saver("", ScreenSaverAnimation::Classic, ScreenSaverSpeed::Fast).is_err()
+        );
+        assert!(
+            set_screen_saver("é", ScreenSaverAnimation::Classic, ScreenSaverSpeed::Fast).is_err()
+        );
+        assert_eq!(reset_screen_saver().encode().unwrap().len(), 5 + 19);
+        let s = ScreenSaver::parse(b"\x01\x02\x05Hello\x00")
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.text, "Hello");
+        assert_eq!(s.animation, Some(ScreenSaverAnimation::CircleRightToLeft));
+        assert_eq!(s.speed, Some(ScreenSaverSpeed::Slow));
+        assert_eq!(ScreenSaver::parse(b"").unwrap(), None);
     }
 
     #[test]

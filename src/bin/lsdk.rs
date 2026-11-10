@@ -72,6 +72,11 @@ enum Cmd {
     Rename { name: String },
     /// Battery status.
     Battery,
+    /// Custom screensaver (Nano X / Nano S Plus, recovery mode only).
+    Screensaver {
+        #[command(subcommand)]
+        cmd: ScreensaverCmd,
+    },
     /// Firmware update.
     Firmware {
         #[command(subcommand)]
@@ -94,6 +99,24 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SolCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum ScreensaverCmd {
+    /// Show the current setting.
+    Get,
+    /// Set a custom scrolling text (1-52 printable ASCII characters).
+    Set {
+        text: String,
+        /// classic, circle-rl, circle-lr
+        #[arg(long, default_value = "classic")]
+        animation: String,
+        /// fast, normal, slow
+        #[arg(long, default_value = "normal")]
+        speed: String,
+    },
+    /// Restore the default screensaver.
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -395,6 +418,35 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Quit => open(&cli)?.quit_app().await?,
         Cmd::Name => println!("{}", open(&cli)?.get_device_name().await?),
         Cmd::Rename { name } => open(&cli)?.set_device_name(name).await?,
+        Cmd::Screensaver { cmd } => {
+            use lsdk::os::{ScreenSaverAnimation, ScreenSaverSpeed};
+            let d = open(&cli)?;
+            match cmd {
+                ScreensaverCmd::Get => match d.get_screen_saver().await? {
+                    Some(s) => print(&s),
+                    None => println!("default screensaver"),
+                },
+                ScreensaverCmd::Set {
+                    text,
+                    animation,
+                    speed,
+                } => {
+                    eprintln!("> confirm on the device");
+                    d.set_screen_saver(
+                        text,
+                        ScreenSaverAnimation::parse(animation)?,
+                        ScreenSaverSpeed::parse(speed)?,
+                    )
+                    .await?;
+                    println!("screensaver set");
+                }
+                ScreensaverCmd::Reset => {
+                    eprintln!("> confirm on the device");
+                    d.reset_screen_saver().await?;
+                    println!("default screensaver restored");
+                }
+            }
+        }
         Cmd::Battery => print(&open(&cli)?.get_battery_status().await?),
         Cmd::Firmware { cmd } => {
             let d = open(&cli)?;

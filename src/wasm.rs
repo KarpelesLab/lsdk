@@ -379,6 +379,35 @@ impl HwDevice {
         self.device.set_device_name(&name).await.map_err(js_err)
     }
 
+    /// Custom screensaver (`null` = default). Recovery mode only.
+    #[wasm_bindgen(js_name = getScreenSaver)]
+    pub async fn get_screen_saver(&self) -> JsResult<JsValue> {
+        to_js(&self.device.get_screen_saver().await.map_err(js_err)?)
+    }
+
+    /// Set a custom screensaver. `animation`: classic | circle-rl | circle-lr;
+    /// `speed`: fast | normal | slow. Recovery mode only, confirmed on device.
+    #[wasm_bindgen(js_name = setScreenSaver)]
+    pub async fn set_screen_saver(
+        &self,
+        text: String,
+        animation: String,
+        speed: String,
+    ) -> JsResult<()> {
+        let a = crate::os::ScreenSaverAnimation::parse(&animation).map_err(js_err)?;
+        let sp = crate::os::ScreenSaverSpeed::parse(&speed).map_err(js_err)?;
+        self.device
+            .set_screen_saver(&text, a, sp)
+            .await
+            .map_err(js_err)
+    }
+
+    /// Restore the default screensaver. Recovery mode only, confirmed on device.
+    #[wasm_bindgen(js_name = resetScreenSaver)]
+    pub async fn reset_screen_saver(&self) -> JsResult<()> {
+        self.device.reset_screen_saver().await.map_err(js_err)
+    }
+
     pub async fn battery(&self) -> JsResult<JsValue> {
         to_js(&self.device.get_battery_status().await.map_err(js_err)?)
     }
