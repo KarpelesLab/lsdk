@@ -141,7 +141,7 @@ const hashFw = () => guard(async () => { fwHash.value = await secure('firmware h
   <div class="grid">
     <p class="note" style="margin:0">
       Developer tools use the device's own secure channel. To sideload your apps, install a <b>custom CA</b> once
-      (recovery mode), then load app ELFs signed into the channel with the CA key. Without a CA key, a random key is
+      (recovery mode), then install app ELFs through a channel authenticated with the CA key. Without a CA key, a random key is
       used and the device asks to allow an unknown manager.
     </p>
     <p v-if="error" class="error">{{ error }}</p>
