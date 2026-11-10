@@ -144,6 +144,33 @@ impl HidTransport {
         &self.info
     }
 
+    /// Read a response without sending anything, waiting up to `timeout`.
+    ///
+    /// Used after a mid-command re-enumeration (e.g. host onboarding): once
+    /// the device is reopened, the host polls it again and the response it
+    /// was trying to send is delivered here.
+    pub fn read_pending_response(&self, timeout: Duration) -> Result<Vec<u8>> {
+        let dev = self
+            .device
+            .lock()
+            .map_err(|_| Error::Transport("device mutex poisoned".into()))?;
+        let mut decoder = framing::Decoder::new(self.channel);
+        let start = Instant::now();
+        let mut buf = [0u8; PACKET_SIZE + 1];
+        loop {
+            let n = dev.read_timeout(&mut buf, 500).map_err(map_hid_err)?;
+            if n == 0 {
+                if start.elapsed() > timeout {
+                    return Err(Error::Timeout);
+                }
+                continue;
+            }
+            if let Some(resp) = decoder.push(&buf[..n])? {
+                return Ok(resp);
+            }
+        }
+    }
+
     fn exchange_blocking(&self, apdu: &[u8]) -> Result<Vec<u8>> {
         let dev = self
             .device

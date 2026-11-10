@@ -741,9 +741,30 @@ async fn run(cli: Cli) -> Result<()> {
                     ));
                 }
             };
-            open(&cli)?
+            eprintln!(
+                "> confirm on the device, then enter your PIN; keep it plugged in while it processes"
+            );
+            match open(&cli)?
                 .onboard(id, pin, prefix, passphrase, words)
-                .await?;
+                .await
+            {
+                Ok(()) => {}
+                // The device re-enumerates once the PIN is entered, while it
+                // derives the seed: reopen it and collect its answer.
+                Err(Error::Disconnected | Error::Transport(_)) => {
+                    eprintln!("> device re-enumerated, waiting for it to finish processing...");
+                    std::thread::sleep(Duration::from_secs(1));
+                    let t = HidTransport::wait_and_open(Duration::from_secs(120))?;
+                    let raw = t.read_pending_response(Duration::from_secs(180))?;
+                    let r = lsdk::Response::from_raw(raw)?;
+                    match r.sw {
+                        lsdk::StatusWord::OK => {}
+                        sw if sw.is_refused() => return Err(Error::UserRefused),
+                        sw => return Err(sw.into()),
+                    }
+                }
+                Err(e) => return Err(e),
+            }
             println!("onboarded ({identity})");
         }
         Cmd::Factory { cmd } => {
