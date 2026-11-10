@@ -35,6 +35,23 @@ const readName = () => guard(async () => {
   })
 })
 
+// Offline attestation (no network). Extra issuer keys are kept per browser.
+const offline = ref(null)
+const extraKeys = ref(localStorage.getItem('lsdk.issuerKeys') || '')
+const checkOffline = () => guard(async () => {
+  offline.value = null
+  try { localStorage.setItem('lsdk.issuerKeys', extraKeys.value) } catch { /* private mode */ }
+  const keys = extraKeys.value.split(/\s+/).filter(Boolean)
+  offline.value = await run('offline genuine check', (d) => d.offlineGenuineCheck((ev) => {
+    if (ev.type === 'permissionRequested') state.prompt = 'Allow the insecure manager connection on the device'
+    if (ev.type === 'permissionGranted') state.prompt = null
+    if (ev.type === 'attesting') state.prompt = 'The device is signing its attestation (a few seconds)…'
+  }, keys))
+  log(offline.value.genuine ? 'ok' : 'error', offline.value.genuine
+    ? `offline attestation verified (${offline.value.issuer})`
+    : 'offline attestation NOT verified')
+})
+
 const loadBattery = () => guard(async () => { battery.value = await run('battery', (d) => d.battery()) })
 
 const rename = () => guard(async () => {
@@ -106,6 +123,32 @@ const quit = () => guard(quitApp)
           <span v-if="genuine === true" class="badge ok">✓ genuine</span>
           <span v-if="genuine === false" class="badge err">✗ not genuine</span>
         </div>
+
+        <h3>Offline genuine check</h3>
+        <p class="muted small-text">
+          Verifies the device attestation locally, without contacting the vendor: the device certificate must be
+          signed by a known issuer key, and the device must sign a fresh challenge with the certified key.
+          The device will warn about an <b>insecure manager connection</b>: that's expected, nothing is installed.
+        </p>
+        <div class="row">
+          <button :disabled="!!state.busy || !onDashboard" @click="checkOffline">Run offline check</button>
+          <span v-if="offline?.genuine" class="badge ok">✓ attestation verified</span>
+          <span v-else-if="offline" class="badge err">✗ not verified</span>
+        </div>
+        <details style="margin-top:8px">
+          <summary class="muted small-text">Additional trusted issuer keys</summary>
+          <textarea v-model="extraKeys" rows="2" placeholder="04… (uncompressed hex, one per line)" style="margin-top:6px"></textarea>
+        </details>
+        <dl v-if="offline" class="kv" style="margin-top:10px">
+          <dt>Issuer</dt><dd>{{ offline.issuer || 'no known issuer key matches' }}</dd>
+          <dt>Proof of possession</dt><dd>{{ offline.proofOfPossession ? 'valid' : 'INVALID' }}</dd>
+          <dt>Device key</dt><dd>{{ offline.devicePublicKey }}</dd>
+          <dt>Signer serial</dt><dd>{{ offline.signerSerial }}</dd>
+          <template v-if="!offline.issuer">
+            <dt>Issuer candidates</dt>
+            <dd><div v-for="c in offline.issuerCandidates" :key="c">{{ c }}</div></dd>
+          </template>
+        </dl>
 
         <h3>Rename</h3>
         <div class="row">

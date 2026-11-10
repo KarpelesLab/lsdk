@@ -47,8 +47,17 @@ enum Cmd {
         #[arg(long)]
         version: Option<String>,
     },
-    /// Genuine check through the HSM.
-    Genuine,
+    /// Genuine check (through the vendor HSM, or --offline).
+    Genuine {
+        /// Verify the device attestation locally against pinned issuer keys,
+        /// without contacting the vendor (the device asks to allow an
+        /// insecure manager connection).
+        #[arg(long)]
+        offline: bool,
+        /// Extra trusted issuer public key (hex, uncompressed), repeatable.
+        #[arg(long = "issuer-key")]
+        issuer_keys: Vec<String>,
+    },
     /// Install an app (and its parent app if needed).
     Install { name: String },
     /// Uninstall an app.
@@ -321,7 +330,44 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Genuine => {
+        Cmd::Genuine {
+            offline: true,
+            issuer_keys,
+        } => {
+            let extra = issuer_keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    hex::decode(k.trim_start_matches("0x"))
+                        .map(|b| (format!("--issuer-key #{}", i + 1), b))
+                        .map_err(|e| Error::InvalidInput(format!("issuer key: {e}")))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let att = lsdk::attestation::offline_genuine_check(&open(&cli)?, &extra, &mut |ev| {
+                use lsdk::attestation::AttestationEvent::*;
+                match ev {
+                    PermissionRequested => {
+                        eprintln!("> allow the (insecure) manager connection on the device")
+                    }
+                    PermissionGranted => eprintln!("> allowed"),
+                    Attesting => eprintln!("> device is signing its attestation..."),
+                }
+            })
+            .await?;
+            print(&att);
+            println!(
+                "{}",
+                if att.genuine {
+                    "genuine (offline attestation)"
+                } else {
+                    "NOT VERIFIED"
+                }
+            );
+            if !att.genuine {
+                std::process::exit(2);
+            }
+        }
+        Cmd::Genuine { .. } => {
             let ok = manager.genuine_check(&open(&cli)?, &mut progress).await?;
             println!("{}", if ok { "genuine" } else { "NOT GENUINE" });
             if !ok {

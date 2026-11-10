@@ -13,7 +13,7 @@ operating system (Nano S, Nano S Plus, Nano X, Stax, Flex, Nano Gen5), over
 USB HID natively or through WebHID in the browser.
 
 * **Detect** devices, read firmware / hardware / onboarding state
-* **Genuine check**, **install / uninstall / update apps**, **firmware updates**
+* **Genuine check**, online (vendor HSM) or **offline** (local attestation check), **install / uninstall / update apps**, **firmware updates**
   (through the vendor HSM secure channel, over websocket)
 * **List apps**, open / quit apps, rename, battery status, raw APDUs
 * **App clients** to derive addresses, **generate transactions**
@@ -54,9 +54,10 @@ Everything is behind cargo features:
 | `manager-api` | app catalog / firmware metadata HTTP client |
 | `hsm` | HSM secure channel (websocket; tokio-tungstenite natively, `WebSocket` in the browser) |
 | `manager` | genuine check, app install / uninstall, firmware update (`manager-api` + `hsm`) |
+| `attestation` | offline genuine check: device attestation verified locally against pinned issuer keys |
 | `eth`, `btc`, `sol`, `apps` | app clients; transactions generated with outscript |
 | `serde` | serde derives on public types |
-| `full` | `hid` + `manager` + `apps` |
+| `full` | `hid` + `manager` + `apps` + `attestation` |
 | `wasm` | JS bindings used by the web console |
 | `cli` | the `lsdk` command line tool |
 
@@ -119,6 +120,7 @@ cargo install --path . --features cli
 lsdk list
 lsdk info
 lsdk genuine
+lsdk genuine --offline        # no network: local attestation check
 lsdk apps
 lsdk install Bitcoin
 lsdk firmware check

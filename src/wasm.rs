@@ -392,6 +392,36 @@ impl HwDevice {
             .map_err(js_err)
     }
 
+    /// Offline genuine check: verify the device attestation locally (no
+    /// network). The device asks to allow an insecure manager connection.
+    /// `extraIssuerKeys`: optional array of hex issuer public keys to trust.
+    #[wasm_bindgen(js_name = offlineGenuineCheck)]
+    pub async fn offline_genuine_check(
+        &self,
+        on_event: Option<Function>,
+        extra_issuer_keys: Option<Vec<String>>,
+    ) -> JsResult<JsValue> {
+        let extra = extra_issuer_keys
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                hex::decode(k.trim().trim_start_matches("0x"))
+                    .map(|b| (format!("custom issuer key #{}", i + 1), b))
+                    .map_err(|e| js_err(Error::InvalidInput(format!("issuer key: {e}"))))
+            })
+            .collect::<JsResult<Vec<_>>>()?;
+        let mut cb = |ev: crate::attestation::AttestationEvent| {
+            if let (Some(cb), Ok(v)) = (&on_event, to_js(&ev)) {
+                let _ = cb.call1(&JsValue::NULL, &v);
+            }
+        };
+        let att = crate::attestation::offline_genuine_check(&self.device, &extra, &mut cb)
+            .await
+            .map_err(js_err)?;
+        to_js(&att)
+    }
+
     /// App catalog for this device.
     pub async fn catalog(&self) -> JsResult<JsValue> {
         let os = self.device.get_version().await.map_err(js_err)?;

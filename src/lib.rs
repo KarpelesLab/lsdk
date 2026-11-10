@@ -47,6 +47,9 @@ pub mod manager;
 #[cfg(feature = "hsm")]
 pub mod hsm;
 
+#[cfg(feature = "attestation")]
+pub mod attestation;
+
 #[cfg(any(feature = "eth", feature = "btc", feature = "sol"))]
 pub mod apps;
 
