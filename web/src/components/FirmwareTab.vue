@@ -1,11 +1,11 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { state, run, hsmEvent, log, errorText, reconnect, refreshInfo } from '../lib/store.js'
+import { state, run, hsmEvent, log, errorText, waitDevice, flashWhileBootloader, finishBootloaderUpdate } from '../lib/store.js'
 import { renderMarkdown } from '../lib/markdown.js'
 
 const error = ref(null)
 const update = ref(undefined) // undefined: not checked, null: up to date
-const phase = ref(null) // null | 'osu' | 'reboot' | 'mcu' | 'done'
+const phase = computed({ get: () => state.fwPhase, set: (v) => { state.fwPhase = v } })
 const v = computed(() => state.info?.version)
 const notesHtml = computed(() => renderMarkdown(update.value?.osu?.notes))
 
@@ -18,13 +18,6 @@ const check = () => guard(async () => {
   update.value = await run('check firmware', (d) => d.checkFirmware())
   log('info', update.value ? `firmware ${update.value.final.name} available` : 'firmware is up to date')
 })
-
-async function waitDevice(label, timeout = 600000) {
-  phase.value = label
-  log('info', 'waiting for the device to restart…')
-  await reconnect({ timeout })
-  await refreshInfo().catch(() => {})
-}
 
 const start = () => guard(async () => {
   const u = update.value
@@ -46,25 +39,7 @@ const start = () => guard(async () => {
   log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
 })
 
-// While the device sits in bootloader mode, flash what its installed firmware
-// needs (MCU or bootloader), then wait for it to restart.
-async function flashWhileBootloader() {
-  for (let i = 0; i < 6 && state.info?.version?.isBootloader; i++) {
-    phase.value = 'mcu'
-    const kind = await run('flash MCU', (d) => d.repairMcu(hsmEvent), { retryOnDisconnect: false }).catch((e) => {
-      if (e?.kind !== 'Disconnected') throw e
-      return 'mcu'
-    })
-    log('ok', `${kind} flashed`)
-    await waitDevice('reboot')
-  }
-}
-
-const finish = () => guard(async () => {
-  await flashWhileBootloader()
-  phase.value = 'done'
-  log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
-})
+const finish = () => guard(finishBootloaderUpdate)
 </script>
 
 <template>

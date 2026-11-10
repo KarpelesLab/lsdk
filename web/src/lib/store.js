@@ -13,6 +13,10 @@ export const state = reactive({
   progress: null, // 0..1 or null
   prompt: null, // message asking for an action on the device
   log: [],
+  // Firmware update flow: null | 'osu' | 'reboot' | 'mcu' | 'done'
+  fwPhase: null,
+  // Hide the bootloader modal until the device reconnects.
+  bootloaderDismissed: false,
 })
 
 let seq = 0
@@ -28,6 +32,7 @@ export function errorText(e) {
 }
 
 function setDevice(dev) {
+  state.bootloaderDismissed = false
   const old = state.device
   state.device = dev ? markRaw(dev) : null
   state.connected = !!dev
@@ -179,4 +184,42 @@ export async function ensureApp(name) {
   if (cur.name === name) return
   if (!isDashboard(cur.name)) await quitApp()
   await openApp(name)
+}
+
+// Wait for the device to come back (reboot / re-enumeration).
+export async function waitDevice(phase = 'reboot', timeout = 600000) {
+  state.fwPhase = phase
+  log('info', 'waiting for the device to restart…')
+  await reconnect({ timeout })
+  await refreshInfo().catch(() => {})
+}
+
+// While the device sits in bootloader mode, flash what its installed firmware
+// needs (MCU or bootloader), waiting for each restart.
+export async function flashWhileBootloader() {
+  for (let i = 0; i < 6 && state.info?.version?.isBootloader; i++) {
+    state.fwPhase = 'mcu'
+    const kind = await run('flash MCU', (d) => {
+      state.prompt = 'Allow the secure connection on the device if asked'
+      return d.repairMcu(hsmEvent)
+    }, { retryOnDisconnect: false }).catch((e) => {
+      if (e?.kind !== 'Disconnected') throw e
+      return 'mcu'
+    })
+    log('ok', `${kind} flashed`)
+    await waitDevice('reboot')
+  }
+  if (state.info?.version?.isBootloader) throw new Error('device is still in bootloader mode after several flashes')
+}
+
+// Finish an interrupted update (device found in bootloader mode).
+export async function finishBootloaderUpdate() {
+  try {
+    await flashWhileBootloader()
+    state.fwPhase = 'done'
+    log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
+  } catch (e) {
+    state.fwPhase = null
+    throw e
+  }
 }

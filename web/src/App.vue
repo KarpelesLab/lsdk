@@ -6,6 +6,7 @@ import AppsTab from './components/AppsTab.vue'
 import FirmwareTab from './components/FirmwareTab.vue'
 import AdvancedTab from './components/AdvancedTab.vue'
 import ActivityLog from './components/ActivityLog.vue'
+import BootloaderModal from './components/BootloaderModal.vue'
 
 const tabs = [
   { id: 'device', label: 'Device', comp: DeviceTab },
@@ -91,6 +92,7 @@ onMounted(() => boot().catch((e) => { error.value = errorText(e); log('error', e
         </template>
       </template>
     </section>
+    <BootloaderModal />
     <aside class="side">
       <ActivityLog />
     </aside>
