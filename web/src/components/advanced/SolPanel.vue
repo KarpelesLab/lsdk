@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { state, run, log, errorText } from '../../lib/store.js'
 import { jsonRpc } from '../../lib/net.js'
 import AppGate from './AppGate.vue'
@@ -37,15 +37,17 @@ const getAddress = (display) => guard(async () => {
   })
   log('info', `SOL address ${address.value}`)
   config.value = await run('app config', (d) => d.solConfig()).catch(() => null)
-  refreshBalance()
 })
 
-async function refreshBalance() {
+const host = computed(() => { try { return new URL(rpc.value).host } catch { return rpc.value } })
+
+const refreshBalance = () => guard(async () => {
+  balance.value = null
   try {
     const r = await jsonRpc(rpc.value, 'getBalance', [address.value])
     balance.value = (r.value / 1e9).toFixed(6)
-  } catch (e) { balance.value = null; log('warn', `balance: ${errorText(e)}`) }
-}
+  } catch (e) { balance.value = null; throw e }
+})
 
 const fetchBlockhash = () => guard(async () => {
   const r = await jsonRpc(rpc.value, 'getLatestBlockhash', [{ commitment: 'finalized' }])
@@ -55,7 +57,6 @@ const fetchBlockhash = () => guard(async () => {
 const sign = () => guard(async () => {
   signed.value = null
   sent.value = null
-  if (!tx.blockhash) await fetchBlockhash()
   signed.value = await run('sign transfer', (d) => {
     state.prompt = 'Review and approve the transfer on the device'
     return d.solTransfer(path.value, tx.to.trim(), tx.amount, tx.blockhash)
@@ -88,6 +89,7 @@ const explorer = (sig) => `https://explorer.solana.com/tx/${sig}${clusters.find(
         <button class="primary" :disabled="!!state.busy" @click="getAddress(false)">Get address</button>
         <button :disabled="!!state.busy" @click="getAddress(true)">Verify on device</button>
         <span v-if="address" class="mono">{{ address }}</span>
+        <button v-if="address" class="small" :title="`sends your address to ${host}`" @click="refreshBalance">Balance via {{ host }}</button>
         <span v-if="balance !== null" class="badge">{{ balance }} SOL</span>
         <span v-if="config" class="badge">app {{ config.version }}</span>
       </div>
@@ -101,11 +103,11 @@ const explorer = (sig) => `https://explorer.solana.com/tx/${sig}${clusters.find(
       </div>
       <div style="margin-top:10px">
         <label>Recent blockhash</label>
-        <div class="row"><input v-model="tx.blockhash" class="mono" style="flex:1" placeholder="fetched automatically" /><button class="small" @click="fetchBlockhash">Fetch</button></div>
+        <div class="row"><input v-model="tx.blockhash" class="mono" style="flex:1" placeholder="paste one, or fetch it" /><button class="small" @click="fetchBlockhash">Fetch from {{ host }}</button></div>
       </div>
       <div class="row" style="margin-top:12px">
-        <button class="primary" :disabled="!!state.busy || !tx.to || !tx.amount" @click="sign">Sign transfer</button>
-        <button v-if="signed" :disabled="!!sent" @click="broadcast">Broadcast</button>
+        <button class="primary" :disabled="!!state.busy || !tx.to || !tx.amount || !tx.blockhash" @click="sign">Sign transfer</button>
+        <button v-if="signed" :disabled="!!sent" @click="broadcast">Broadcast via {{ host }}</button>
         <a v-if="sent" :href="explorer(sent)" target="_blank" rel="noopener">view on explorer</a>
       </div>
       <p class="muted small-text">A blockhash expires after ~60 seconds: broadcast promptly after signing.</p>

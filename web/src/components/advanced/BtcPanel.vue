@@ -55,8 +55,17 @@ async function guard(fn) {
 const loadAccount = () => guard(async () => {
   account.value = await run('load account', (d) => d.btcAccount(kind.value, Number(accountIdx.value), net.value.testnet))
   log('info', `account ${account.value.path}`)
-  await scan()
+  // Local derivation only: nothing is sent anywhere until "Scan" is clicked.
+  addrs.value = {
+    receive: btcDeriveAddresses(account.value.xpub, kind.value, net.value.testnet, 0, 0, 1).map((address, index) => ({ index, address, txs: 0, balance: 0 })),
+    change: [],
+  }
+  utxos.value = []
+  scanned.value = false
 })
+
+const apiHost = computed(() => { try { return new URL(apiUrl.value).host } catch { return apiUrl.value } })
+const scanned = ref(false)
 
 async function scanChain(api, change) {
   const out = []
@@ -86,8 +95,14 @@ const scan = () => guard(async () => {
         for (const u of await api.utxos(a.address)) found.push({ ...u, change: chain, index: a.index, address: a.address })
       }
     }
+    // Previous transactions (needed by the device for non-taproot inputs),
+    // fetched now so that building and signing stays offline.
+    if (kind.value !== 'taproot') {
+      for (const u of found) u.prevTx = await api.txHex(u.txid)
+    }
     utxos.value = found
-    log('info', `${found.length} UTXOs, ${satsToBtc(balance.value)} BTC`)
+    scanned.value = true
+    log('info', `${found.length} UTXOs, ${satsToBtc(balance.value)} BTC (via ${apiHost.value})`)
     if (!send.feeRate) {
       const f = await api.fees().catch(() => null)
       if (f) send.feeRate = String(f.halfHourFee)
@@ -139,12 +154,9 @@ const build = () => guard(async () => {
   if (!(rate > 0)) throw new Error('set a fee rate')
   const sel = selectCoins(send.max ? 0 : btcToSats(send.amount), rate, send.max)
   if (sel.amount < DUST) throw new Error('amount too small')
-  const api = new Esplora(apiUrl.value)
-  const needPrev = kind.value !== 'taproot'
-  const inputs = await Promise.all(sel.inputs.map(async (u) => ({
-    txid: u.txid, vout: u.vout, amount: u.value, change: u.change, index: u.index,
-    prevTx: needPrev ? await api.txHex(u.txid) : undefined,
-  })))
+  const inputs = sel.inputs.map((u) => ({
+    txid: u.txid, vout: u.vout, amount: u.value, change: u.change, index: u.index, prevTx: u.prevTx,
+  }))
   const req = {
     kind: kind.value, account: Number(accountIdx.value), testnet: net.value.testnet,
     utxos: inputs, payments: [{ address: send.to.trim(), amount: sel.amount }],
@@ -193,9 +205,13 @@ const signPsbt = () => guard(async () => {
       <div style="margin-top:10px"><label>Esplora API (UTXOs, fees, broadcast)</label><input v-model="apiUrl" class="mono" /></div>
       <div class="row" style="margin-top:12px">
         <button class="primary" :disabled="!!state.busy || scanning" @click="loadAccount">Load account</button>
-        <button v-if="account" :disabled="scanning" @click="scan">{{ scanning ? 'Scanning…' : 'Rescan' }}</button>
-        <span v-if="account" class="badge accent">{{ satsToBtc(balance) }} BTC</span>
+        <button v-if="account" :disabled="scanning" @click="scan">{{ scanning ? 'Scanning…' : (scanned ? 'Rescan' : 'Scan') + ' via ' + apiHost }}</button>
+        <span v-if="scanned" class="badge accent">{{ satsToBtc(balance) }} BTC</span>
       </div>
+      <p v-if="account && !scanned" class="muted small-text">
+        Scanning sends your account's addresses to <b>{{ apiHost }}</b> (balances, UTXOs, previous transactions,
+        fee rates), which can link them together and to your IP. Use your own Esplora instance for privacy.
+      </p>
       <dl v-if="account" class="kv" style="margin-top:12px">
         <dt>Key</dt><dd>{{ account.key }}</dd>
         <dt>Descriptor</dt><dd>{{ account.descriptor }}</dd>
@@ -235,7 +251,7 @@ const signPsbt = () => guard(async () => {
         <label class="check"><input type="checkbox" v-model="send.max" /> send everything</label>
         <div class="spacer"></div>
         <button class="primary" :disabled="!!state.busy || !send.to || (!send.amount && !send.max) || !utxos.length" @click="build">Build &amp; sign</button>
-        <button v-if="result" :disabled="!!broadcastId" @click="broadcast">Broadcast</button>
+        <button v-if="result" :disabled="!!broadcastId" @click="broadcast">Broadcast via {{ apiHost }}</button>
         <a v-if="broadcastId" :href="net.explorer + broadcastId" target="_blank" rel="noopener">view on explorer</a>
       </div>
       <template v-if="result">

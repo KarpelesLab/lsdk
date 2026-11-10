@@ -49,15 +49,17 @@ const getAddress = (display) => guard(async () => {
   address.value = a.address
   log('info', `ETH address ${a.address}`)
   config.value = await run('app config', (d) => d.ethConfig()).catch(() => null)
-  if (rpc.value) refreshBalance()
 })
 
-async function refreshBalance() {
+const host = computed(() => { try { return new URL(rpc.value).host } catch { return rpc.value } })
+
+const refreshBalance = () => guard(async () => {
+  balance.value = null
   try {
     const b = await jsonRpc(rpc.value, 'eth_getBalance', [address.value, 'latest'])
     balance.value = (Number(BigInt(b)) / 1e18).toFixed(6)
-  } catch (e) { balance.value = null; log('warn', `balance: ${errorText(e)}`) }
-}
+  } catch (e) { balance.value = null; throw e }
+})
 
 const tokenData = () => {
   // ERC-20 transfer calldata is built in Rust when `token` is set; for gas
@@ -147,6 +149,7 @@ const signTyped = () => guard(async () => {
         <button class="primary" :disabled="!!state.busy" @click="getAddress(false)">Get address</button>
         <button :disabled="!!state.busy" @click="getAddress(true)">Verify on device</button>
         <span v-if="address" class="mono">{{ address }}</span>
+        <button v-if="address" class="small" :disabled="!rpc" :title="`sends your address to ${host}`" @click="refreshBalance">Balance via {{ host }}</button>
         <span v-if="balance !== null" class="badge">{{ balance }}</span>
         <span v-if="config" class="badge" :class="config.blindSigningEnabled ? 'warn' : ''">app {{ config.version }} · blind signing {{ config.blindSigningEnabled ? 'on' : 'off' }}</span>
       </div>
@@ -155,7 +158,7 @@ const signTyped = () => guard(async () => {
     <div class="panel">
       <div class="row"><h2>Send</h2><div class="spacer"></div>
         <label class="check"><input type="checkbox" v-model="tx.legacy" /> legacy gas price</label>
-        <button class="small" :disabled="!address || !rpc" @click="fill">Fill from network</button>
+        <button class="small" :disabled="!address || !rpc" :title="`sends your address to ${host}`" @click="fill">Fill from {{ host }}</button>
       </div>
       <div class="grid cols-2">
         <div><label>To</label><input v-model="tx.to" class="mono" placeholder="0x…" /></div>
@@ -175,7 +178,7 @@ const signTyped = () => guard(async () => {
       <div style="margin-top:10px" v-if="!tx.token"><label>Data (hex, optional; contract calls need blind signing or clear signing support)</label><input v-model="tx.data" class="mono" placeholder="0x" /></div>
       <div class="row" style="margin-top:12px">
         <button class="primary" :disabled="!!state.busy || !tx.to || tx.nonce === ''" @click="sign">Sign transaction</button>
-        <button v-if="signed" :disabled="!rpc || !!sent" @click="broadcast">Broadcast</button>
+        <button v-if="signed" :disabled="!rpc || !!sent" @click="broadcast">Broadcast via {{ host }}</button>
         <a v-if="sent && chain" :href="chain.explorer + sent" target="_blank" rel="noopener">view on explorer</a>
       </div>
       <template v-if="signed">
