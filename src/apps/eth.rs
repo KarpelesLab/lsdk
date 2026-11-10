@@ -169,12 +169,10 @@ impl<'d, T: Transport> EthApp<'d, T> {
         path: &DerivationPath,
         unsigned_tx: &[u8],
     ) -> Result<EthSignature> {
-        let tx = EvmTx::parse_transaction(unsigned_tx)
-            .map_err(|e| Error::InvalidInput(format!("invalid transaction: {e:?}")))?;
-        let typed = tx.tx_type != EvmTxType::Legacy;
+        let (chain_id, typed) = unsigned_tx_info(unsigned_tx)?;
         let mut payload = path.encode();
         payload.extend_from_slice(unsigned_tx);
-        let chunks = safe_chunks(&payload, if typed { None } else { Some(tx.chain_id) });
+        let chunks = safe_chunks(&payload, if typed { None } else { Some(chain_id) });
         let mut resp = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let p1 = if i == 0 { 0x00 } else { 0x80 };
@@ -182,7 +180,7 @@ impl<'d, T: Transport> EthApp<'d, T> {
                 .send(Apdu::with_data(CLA, INS_SIGN, p1, 0x00, chunk.to_vec()))
                 .await?;
         }
-        parse_signature(&resp, Some((tx.chain_id, typed)))
+        parse_signature(&resp, Some((chain_id, typed)))
     }
 
     /// Sign an [`EvmTx`] and store the signature in it.
@@ -245,6 +243,71 @@ impl<'d, T: Transport> EthApp<'d, T> {
             ))
             .await?;
         parse_signature(&resp, None)
+    }
+}
+
+/// Build the signed encoding of an unsigned transaction and its signature.
+pub fn assemble_signed(unsigned: &[u8], sig: &EthSignature) -> Result<Vec<u8>> {
+    use outscript::rlp::{RlpItem, decode_one, encode_list};
+    let (_, typed) = unsigned_tx_info(unsigned)?;
+    let trim = |b: &[u8]| -> Vec<u8> { b.iter().skip_while(|x| **x == 0).copied().collect() };
+    if typed {
+        let mut tx = EvmTx::parse_transaction(unsigned)
+            .map_err(|e| Error::InvalidInput(format!("{e:?}")))?;
+        tx.signed = true;
+        tx.y = BigInt::from(sig.v);
+        tx.r = BigInt::from_bytes_be(Sign::Plus, &sig.r);
+        tx.s = BigInt::from_bytes_be(Sign::Plus, &sig.s);
+        return tx
+            .to_bytes()
+            .map_err(|e| Error::InvalidInput(format!("{e:?}")));
+    }
+    let (item, _) = decode_one(unsigned).map_err(|e| Error::InvalidInput(format!("{e:?}")))?;
+    let mut fields = item
+        .as_list()
+        .ok_or_else(|| Error::InvalidInput("not a list".into()))?[..6]
+        .to_vec();
+    fields.push(RlpItem::uint(sig.v));
+    fields.push(RlpItem::Bytes(trim(&sig.r)));
+    fields.push(RlpItem::Bytes(trim(&sig.s)));
+    Ok(encode_list(&fields))
+}
+
+/// Chain id and "typed" flag of an unsigned transaction encoding.
+///
+/// Unsigned legacy transactions end with the EIP-155 `(chain_id, 0, 0)`
+/// trailer (or nothing for pre-EIP-155), which must not be read as `v, r, s`.
+fn unsigned_tx_info(unsigned: &[u8]) -> Result<(u64, bool)> {
+    let bad = |e: String| Error::InvalidInput(format!("invalid transaction: {e}"));
+    match unsigned.first() {
+        Some(&b) if b >= 0xc0 => {
+            let (item, rest) =
+                outscript::rlp::decode_one(unsigned).map_err(|e| bad(format!("{e:?}")))?;
+            if !rest.is_empty() {
+                return Err(bad("trailing data".into()));
+            }
+            let fields = item.as_list().ok_or_else(|| bad("not a list".into()))?;
+            match fields.len() {
+                6 => Ok((0, false)),
+                9 => {
+                    let cid = fields[6]
+                        .as_bytes()
+                        .ok_or_else(|| bad("bad chain id".into()))?;
+                    let cid = outscript::rlp::decode_uint64_checked(cid)
+                        .map_err(|e| bad(format!("{e:?}")))?;
+                    Ok((cid, false))
+                }
+                n => Err(bad(format!("unexpected legacy field count {n}"))),
+            }
+        }
+        Some(&t) if t < 0x80 => {
+            let tx = EvmTx::parse_transaction(unsigned).map_err(|e| bad(format!("{e:?}")))?;
+            if tx.signed {
+                return Err(bad("transaction is already signed".into()));
+            }
+            Ok((tx.chain_id, true))
+        }
+        _ => Err(bad("empty or malformed".into())),
     }
 }
 
@@ -372,6 +435,58 @@ mod tests {
         assert_eq!(parse_signature(&resp, Some((137, false))).unwrap().v, 310);
         resp[0] = 1;
         assert_eq!(parse_signature(&resp, Some((1, true))).unwrap().v, 1);
+    }
+
+    #[test]
+    fn unsigned_info() {
+        for (ty, cid) in [
+            (EvmTxType::Legacy, 137u64),
+            (EvmTxType::Legacy, 1),
+            (EvmTxType::Eip1559, 8453),
+        ] {
+            let tx = EvmTx {
+                tx_type: ty,
+                chain_id: cid,
+                nonce: 1,
+                gas: 21000,
+                gas_fee_cap: BigInt::from(1),
+                to: "0x0000000000000000000000000000000000000001".into(),
+                ..Default::default()
+            };
+            let b = tx.sign_bytes().unwrap();
+            assert_eq!(
+                unsigned_tx_info(&b).unwrap(),
+                (cid, ty != EvmTxType::Legacy)
+            );
+        }
+    }
+
+    #[test]
+    fn assemble_matches_evmtx() {
+        let mut tx = EvmTx {
+            tx_type: EvmTxType::Legacy,
+            chain_id: 137,
+            nonce: 3,
+            gas: 21000,
+            gas_fee_cap: BigInt::from(30_000_000_000u64),
+            to: "0x0000000000000000000000000000000000000001".into(),
+            value: BigInt::from(5),
+            ..Default::default()
+        };
+        let unsigned = tx.sign_bytes().unwrap();
+        let sig = EthSignature {
+            v: 310,
+            r: [1; 32],
+            s: [2; 32],
+        };
+        tx.signed = true;
+        tx.y = BigInt::from(310);
+        tx.r = BigInt::from_bytes_be(Sign::Plus, &[1; 32]);
+        tx.s = BigInt::from_bytes_be(Sign::Plus, &[2; 32]);
+        assert_eq!(
+            assemble_signed(&unsigned, &sig).unwrap(),
+            tx.to_bytes().unwrap()
+        );
     }
 
     #[test]

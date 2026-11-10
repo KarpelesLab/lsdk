@@ -448,13 +448,8 @@ async fn run(cli: Cli) -> Result<()> {
                 EthCmd::SignRaw { path: p, hex } => {
                     let raw = hex::decode(hex.trim_start_matches("0x"))
                         .map_err(|e| Error::InvalidInput(e.to_string()))?;
-                    let mut tx = eth::EvmTx::parse_transaction(&raw)
-                        .map_err(|e| Error::InvalidInput(format!("{e:?}")))?;
-                    app.sign_tx(&path(p)?, &mut tx).await?;
-                    println!(
-                        "0x{}",
-                        hex::encode(tx.to_bytes().map_err(|e| Error::App(format!("{e:?}")))?)
-                    );
+                    let sig = app.sign_transaction(&path(p)?, &raw).await?;
+                    println!("0x{}", hex::encode(eth::assemble_signed(&raw, &sig)?));
                 }
                 EthCmd::SignMessage { path: p, message } => {
                     let sig = app
