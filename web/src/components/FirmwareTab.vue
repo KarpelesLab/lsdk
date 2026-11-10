@@ -1,11 +1,13 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { state, run, hsmEvent, log, errorText, reconnect, refreshInfo } from '../lib/store.js'
+import { renderMarkdown } from '../lib/markdown.js'
 
 const error = ref(null)
 const update = ref(undefined) // undefined: not checked, null: up to date
 const phase = ref(null) // null | 'osu' | 'reboot' | 'mcu' | 'done'
 const v = computed(() => state.info?.version)
+const notesHtml = computed(() => renderMarkdown(update.value?.osu?.notes))
 
 async function guard(fn) {
   error.value = null
@@ -89,7 +91,7 @@ const start = () => guard(async () => {
         (or the bootloader screen), unplug/replug it, or click <b>Connect device</b> in the header and select it again.
       </p>
       <h3 v-if="update.osu.notes">Release notes</h3>
-      <div v-if="update.osu.notes" class="out notes">{{ update.osu.notes }}</div>
+      <div v-if="update.osu.notes" class="notes md" v-html="notesHtml"></div>
     </div>
 
     <div v-if="phase === 'done'" class="panel"><span class="badge ok">✓ update finished</span></div>
@@ -100,5 +102,12 @@ const start = () => guard(async () => {
 .steps { margin: 12px 0; padding-left: 20px; color: var(--ink-2); }
 .steps li { padding: 2px 0; }
 .steps li.on { color: var(--accent); font-weight: 600; }
-.notes { max-height: 320px; font-family: var(--sans); font-size: 13px; }
+.notes { max-height: 420px; overflow: auto; background: var(--panel-2); border-radius: 8px; padding: 4px 16px; font-size: 13.5px; line-height: 1.6; }
+.md :deep(h1), .md :deep(h2), .md :deep(h3) { font-size: 14px; margin: 14px 0 6px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.md :deep(p) { margin: 8px 0; }
+.md :deep(ul), .md :deep(ol) { margin: 6px 0; padding-left: 22px; }
+.md :deep(li) { margin: 2px 0; }
+.md :deep(em) { color: var(--ink-2); }
+.md :deep(code) { background: var(--panel); padding: 1px 4px; border-radius: 4px; }
+.md :deep(hr) { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
 </style>
