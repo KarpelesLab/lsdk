@@ -159,7 +159,7 @@ impl LanguagePackage {
             "english" => 0,
             "french" => 1,
             "spanish" => 2,
-            "portuguese" => 3,
+            "portuguese" | "brazilian" => 3,
             "german" => 4,
             "russian" => 5,
             "turkish" => 6,

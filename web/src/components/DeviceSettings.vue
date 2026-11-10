@@ -9,7 +9,7 @@ const choice = ref('')
 const mac = ref(null)
 const limit = ref(100)
 
-const langNames = ['English', 'French', 'Spanish', 'Portuguese', 'German', 'Russian', 'Turkish']
+const langNames = ['English', 'French', 'Spanish', 'Portuguese (Brazil)', 'German', 'Russian', 'Turkish']
 const v = computed(() => state.info?.version)
 const onDashboard = computed(() => !state.info?.locked && (!state.info?.app || isDashboard(state.info.app.name)))
 const ble = computed(() => ['Nano X', 'Stax', 'Flex', 'Nano Gen5'].includes(state.info?.model))

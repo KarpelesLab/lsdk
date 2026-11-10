@@ -245,7 +245,14 @@ impl<T: Transport> Device<T> {
 
     /// Endorsement key and certificate of a slot.
     pub async fn endorsement_info(&self, slot: EndorsementSlot) -> Result<EndorsementInfo> {
-        EndorsementInfo::parse(&self.check(self.exchange(&os::endorsement_info(slot)).await?)?)
+        let r = self.exchange(&os::endorsement_info(slot)).await?;
+        if !r.sw.is_ok() && !r.sw.is_refused() && r.sw != StatusWord::LOCKED_DEVICE {
+            return Err(Error::NotFound(format!(
+                "endorsement slot {} is not set up ({})",
+                slot as u8, r.sw
+            )));
+        }
+        EndorsementInfo::parse(&self.check(r)?)
     }
 
     /// Start an endorsement: the device generates the slot key and returns

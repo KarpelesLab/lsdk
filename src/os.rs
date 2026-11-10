@@ -239,7 +239,7 @@ pub fn language_name(id: u32) -> &'static str {
         0 => "English",
         1 => "French",
         2 => "Spanish",
-        3 => "Portuguese",
+        3 => "Portuguese (Brazil)",
         4 => "German",
         5 => "Russian",
         6 => "Turkish",
