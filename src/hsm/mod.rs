@@ -92,6 +92,14 @@ fn map_device_error(sw: StatusWord) -> Error {
              (PIN entered) and on the dashboard, then retry"
         )),
         0x6a84 | 0x5102 => Error::App("not enough space on the device".into()),
+        // The vendor certificate chain is refused: a custom CA is installed,
+        // which disables vendor-managed operations.
+        0x6804 => Error::App(format!(
+            "the device refused the vendor's certificate ({sw}). This happens when a custom CA is installed: \
+             while it is present, vendor operations (app install / uninstall from the catalog, genuine check, \
+             firmware update) are disabled. Sideloading with your CA still works. To use vendor operations, \
+             remove the CA in recovery mode (lsdk ca remove, or Advanced > Developer > Remove CA)."
+        )),
         _ => Error::Status(sw),
     }
 }

@@ -148,6 +148,7 @@ impl StatusWord {
             0x6982 => "security status not satisfied",
             0x6faa => "device halted",
             0x6624 => "invalid state",
+            0x6804 => "certificate refused (custom CA installed?)",
             0x6615 => "secure command refused: device locked or secure channel not established",
             0x6616 => "secure channel not established",
             0x6a82 => "file not found",
