@@ -39,7 +39,7 @@ pub struct FirmwareContext {
 }
 
 /// An available firmware update.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareUpdate {
     pub osu: OsuFirmware,

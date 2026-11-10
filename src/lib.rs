@@ -50,6 +50,9 @@ pub mod hsm;
 #[cfg(any(feature = "eth", feature = "btc", feature = "sol"))]
 pub mod apps;
 
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub mod wasm;
+
 pub use apdu::{Apdu, Response, StatusWord};
 pub use device::Device;
 pub use error::{Error, Result};
