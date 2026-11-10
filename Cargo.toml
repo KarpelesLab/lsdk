@@ -48,9 +48,9 @@ recover = ["scp", "dep:num-bigint", "dep:serde", "dep:serde_json", "serde"]
 ## App images (ELF / Intel HEX) and sideloading through the secure channel
 loader = ["scp"]
 ## Manager HTTP API client (app catalog, firmware metadata)
-manager-api = ["dep:reqwest", "dep:serde", "dep:serde_json", "serde"]
+manager-api = ["dep:rsurl", "dep:serde", "dep:serde_json", "serde"]
 ## HSM secure channel over websocket (genuine check, app install/uninstall, firmware)
-hsm = ["serde", "dep:serde", "dep:serde_json", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:futures-channel"]
+hsm = ["serde", "dep:serde", "dep:serde_json", "dep:rsurl"]
 ## High level manager operations (requires manager-api + hsm)
 manager = ["manager-api", "hsm"]
 ## Ethereum app client (transactions built with outscript)
@@ -83,15 +83,14 @@ futures-util = { version = "0.3.34", default-features = false, features = ["sink
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls"], optional = true }
+rsurl = { version = "0.1.22", default-features = false, features = ["purecrypto-tls", "json", "tokio-rt"], optional = true }
 hidapi = { version = "2.6.7", optional = true }
 tokio = { version = "1.54.1", features = ["net", "time"], optional = true }
-tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots", "connect"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 serde-wasm-bindgen = { version = "0.6", optional = true }
 js-sys = { version = "0.3.107", optional = true }
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "query"], optional = true }
+rsurl = { version = "0.1.22", default-features = false, features = ["json"], optional = true }
 wasm-bindgen = { version = "0.2.130", optional = true }
 wasm-bindgen-futures = { version = "0.4.80", optional = true }
 web-sys = { version = "0.3.107", features = ["WebSocket", "MessageEvent", "CloseEvent", "Event", "BinaryType", "Window"], optional = true }

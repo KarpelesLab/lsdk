@@ -178,7 +178,6 @@ struct LatestFirmwareResponse {
 #[derive(Clone, Debug)]
 pub struct ManagerApi {
     base_url: String,
-    client: reqwest::Client,
     /// Firmware distribution salt (staged rollouts). `"0"` by default.
     pub salt: String,
 }
@@ -189,15 +188,53 @@ impl Default for ManagerApi {
     }
 }
 
-fn http_err(e: reqwest::Error) -> Error {
+fn http_err(e: rsurl::Error) -> Error {
     Error::Http(e.to_string())
+}
+
+/// Percent-encode a query component (RFC 3986 unreserved characters kept).
+fn encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+async fn send(req: rsurl::aio::Request) -> Result<rsurl::aio::Response> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let resp = rsurl::aio::request(&rsurl::aio::TokioRuntime, &req).await;
+    #[cfg(target_arch = "wasm32")]
+    let resp = rsurl::aio::request(&req).await;
+    resp.map_err(http_err)
+}
+
+fn check(url: &str, resp: &rsurl::aio::Response) -> Result<()> {
+    if resp.is_success() {
+        Ok(())
+    } else {
+        Err(Error::Http(format!(
+            "{url}: HTTP {} {}",
+            resp.status, resp.reason
+        )))
+    }
+}
+
+fn request(method: &str, url: &str) -> rsurl::aio::Request {
+    rsurl::aio::Request::new(method, url)
+        .follow_redirects(true)
+        .timeout(std::time::Duration::from_secs(60))
 }
 
 impl ManagerApi {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            client: reqwest::Client::new(),
             salt: "0".into(),
         }
     }
@@ -211,22 +248,19 @@ impl ManagerApi {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .query(query)
-            .send()
-            .await
-            .map_err(http_err)?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
+        let mut url = format!("{}{}", self.base_url, path);
+        for (i, (k, v)) in query.iter().enumerate() {
+            url.push(if i == 0 { '?' } else { '&' });
+            url.push_str(&encode(k));
+            url.push('=');
+            url.push_str(&encode(v));
+        }
+        let resp = send(request("GET", &url)).await?;
+        if resp.status == 404 {
             return Err(Error::NotFound(format!("{path} {query:?}")));
         }
-        if !status.is_success() {
-            return Err(Error::Http(format!("{url}: HTTP {status}")));
-        }
-        resp.json().await.map_err(http_err)
+        check(&url, &resp)?;
+        resp.json().map_err(http_err)
     }
 
     /// Device version from a target id.
@@ -355,27 +389,21 @@ impl ManagerApi {
 
     /// Download a text resource (APDU scripts).
     pub async fn fetch_text(&self, url: &str) -> Result<String> {
-        let resp = self.client.get(url).send().await.map_err(http_err)?;
-        if !resp.status().is_success() {
-            return Err(Error::Http(format!("{url}: HTTP {}", resp.status())));
-        }
-        resp.text().await.map_err(http_err)
+        let resp = send(request("GET", url)).await?;
+        check(url, &resp)?;
+        resp.text().map_err(http_err)
     }
 
     /// Resolve installed app hashes to catalog entries.
     pub async fn get_apps_by_hash(&self, hashes: &[String]) -> Result<Vec<Option<Application>>> {
         let url = format!("{}/v2/apps/hash", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .json(hashes)
-            .send()
-            .await
-            .map_err(http_err)?;
-        if !resp.status().is_success() {
-            return Err(Error::Http(format!("{url}: HTTP {}", resp.status())));
-        }
-        resp.json().await.map_err(http_err)
+        let body = serde_json::to_vec(hashes).map_err(|e| Error::Http(e.to_string()))?;
+        let req = request("POST", &url)
+            .header("Content-Type", "application/json")
+            .body(body);
+        let resp = send(req).await?;
+        check(&url, &resp)?;
+        resp.json().map_err(http_err)
     }
 }
 

@@ -62,8 +62,8 @@ Everything is behind cargo features:
 | *(none)* | APDU types, HID framing, device models, `Transport` trait, dashboard commands (`Device`) |
 | `hid` *(default)* | native USB transport (`hidapi`) |
 | `webhid` | WebHID transport (`wasm32`) |
-| `manager-api` | app catalog / firmware metadata HTTP client |
-| `hsm` | HSM secure channel (websocket; tokio-tungstenite natively, `WebSocket` in the browser) |
+| `manager-api` | app catalog / firmware metadata HTTP client (rsurl) |
+| `hsm` | HSM secure channel (websocket over [rsurl](https://crates.io/crates/rsurl): its own sockets and TLS natively, `WebSocket` in the browser) |
 | `manager` | genuine check, app install / uninstall, firmware update (`manager-api` + `hsm`) |
 | `attestation` | offline genuine check: device attestation verified locally against pinned issuer keys |
 | `scp` | dashboard secure channel: secure commands, custom CA management |

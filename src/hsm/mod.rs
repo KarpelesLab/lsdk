@@ -18,15 +18,8 @@ use crate::apdu::{Response, StatusWord};
 use crate::error::{Error, Result};
 use crate::transport::Transport;
 
-#[cfg(not(target_arch = "wasm32"))]
-mod ws_native;
-#[cfg(not(target_arch = "wasm32"))]
-use ws_native::WsConn;
-
-#[cfg(target_arch = "wasm32")]
-mod ws_wasm;
-#[cfg(target_arch = "wasm32")]
-use ws_wasm::WsConn;
+mod ws;
+use ws::WsConn;
 
 /// Default HSM websocket base URL.
 pub const DEFAULT_BASE_URL: &str = "wss://scriptrunner.api.live.ledger.com/update";
