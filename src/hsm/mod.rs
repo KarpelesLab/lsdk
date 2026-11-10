@@ -82,6 +82,20 @@ struct InMessage {
     result: Option<Value>,
 }
 
+/// Turn a device status met during a secure channel session into an error.
+fn map_device_error(sw: StatusWord) -> Error {
+    match sw.0 {
+        _ if sw.is_refused() => Error::UserRefused,
+        0x5515 => Error::Locked,
+        0x6615 | 0x6616 => Error::App(format!(
+            "the device refused a secure command ({sw}): make sure it is set up, unlocked \
+             (PIN entered) and on the dashboard, then retry"
+        )),
+        0x6a84 | 0x5102 => Error::App("not enough space on the device".into()),
+        _ => Error::Status(sw),
+    }
+}
+
 /// Build an HSM URL: `base + path + ?k=v&...` (values percent-encoded).
 pub fn build_url(base: &str, path: &str, params: &[(&str, &str)]) -> String {
     let mut url = format!("{}{}", base.trim_end_matches('/'), path);
@@ -162,7 +176,7 @@ pub async fn run<T: Transport + ?Sized>(
                     StatusWord::LOCKED_DEVICE => return Err(Error::Locked),
                     sw if asks_permission && sw.is_refused() => return Err(Error::UserRefused),
                     sw => {
-                        device_error = Some(Error::Status(sw));
+                        device_error = Some(map_device_error(sw));
                         "error"
                     }
                 };
@@ -194,10 +208,7 @@ pub async fn run<T: Transport + ?Sized>(
                 for (i, apdu) in list.iter().enumerate() {
                     let resp = Response::from_raw(transport.exchange(apdu).await?)?;
                     if !resp.sw.is_ok() {
-                        return Err(match resp.sw {
-                            sw if sw.is_refused() => Error::UserRefused,
-                            sw => sw.into(),
-                        });
+                        return Err(map_device_error(resp.sw));
                     }
                     on_event(HsmEvent::Progress {
                         index: i + 1,
