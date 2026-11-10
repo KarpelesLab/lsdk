@@ -41,8 +41,10 @@ export async function boot() {
   state.supported = isSupported()
   state.ready = true
   if (!state.supported) return
-  navigator.hid.addEventListener('disconnect', () => {
-    if (state.device && state.device.disconnected) {
+  navigator.hid.addEventListener('disconnect', (ev) => {
+    // Compare with our HIDDevice directly: the transport's own listener may
+    // not have run yet.
+    if (state.device && (ev.device === state.device.hidDevice || state.device.disconnected)) {
       state.connected = false
       log('warn', 'device disconnected')
     }
@@ -71,6 +73,9 @@ export async function reconnect({ timeout = 30000, quiet = false } = {}) {
   try {
     await sleep(300)
     for (;;) {
+      // The user may have picked the device again meanwhile (Connect button),
+      // e.g. when it re-enumerated under a new USB product id.
+      if (state.connected && state.device && !state.device.disconnected) return state.device
       try {
         const dev = await HwDevice.reconnect()
         setDevice(dev)

@@ -331,6 +331,11 @@ impl Manager {
 
     /// Check whether a firmware update is available.
     pub async fn check_firmware_update(&self, os: &OsVersion) -> Result<Option<FirmwareUpdate>> {
+        if os.is_bootloader {
+            return Err(Error::App(
+                "device is in bootloader mode: finish the update with repair_mcu (flash the MCU) first".into(),
+            ));
+        }
         let provider = os.provider_id();
         let dv = self.api.get_device_version(os.target_id, provider).await?;
         let osu = if os.is_osu {
@@ -416,6 +421,47 @@ impl Manager {
         if !os.is_bootloader {
             return Err(Error::App("device is not in bootloader mode".into()));
         }
+        self.flash_mcu_for(device, &os, &update.final_firmware, on_event)
+            .await
+    }
+
+    /// Recovery from bootloader mode without an update context (page reloaded,
+    /// update interrupted...): the bootloader reports the installed SE firmware,
+    /// from which the required MCU is derived. Returns `None` when the device
+    /// is not in bootloader mode.
+    pub async fn repair_mcu<T: Transport>(
+        &self,
+        device: &Device<T>,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<Option<FlashKind>> {
+        let os = device.get_version().await?;
+        if !os.is_bootloader {
+            return Ok(None);
+        }
+        let (Some(se_target), false) = (os.se_target_id, os.se_version.is_empty()) else {
+            return Err(Error::App(
+                "the bootloader does not report the installed firmware; cannot pick an MCU version"
+                    .into(),
+            ));
+        };
+        let provider = os.provider_id();
+        let dv = self.api.get_device_version(se_target, provider).await?;
+        let final_firmware = self
+            .api
+            .get_firmware_version(dv.id, &os.se_version, provider)
+            .await?;
+        self.flash_mcu_for(device, &os, &final_firmware, on_event)
+            .await
+            .map(Some)
+    }
+
+    async fn flash_mcu_for<T: Transport>(
+        &self,
+        device: &Device<T>,
+        os: &OsVersion,
+        final_firmware: &FinalFirmware,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<FlashKind> {
         let mcus = self.api.get_mcu_versions().await?;
         let provider = os.provider_id();
         let candidates: Vec<McuVersion> = mcus
@@ -423,7 +469,7 @@ impl Manager {
             .filter(|m| {
                 m.providers.contains(&provider)
                     && m.from_bootloader_version != "none"
-                    && update.final_firmware.mcu_versions.contains(&m.id)
+                    && final_firmware.mcu_versions.contains(&m.id)
             })
             .collect();
         let mcu = api::find_best_mcu(&candidates)

@@ -91,6 +91,8 @@ enum FirmwareCmd {
     Check,
     /// Install the latest firmware (OSU, then MCU if needed).
     Update,
+    /// Device stuck in bootloader mode: flash the MCU its firmware needs.
+    Repair,
 }
 
 #[derive(Subcommand)]
@@ -351,8 +353,14 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Firmware { cmd } => {
             let d = open(&cli)?;
             let os = d.get_version().await?;
+            if os.is_bootloader || matches!(cmd, FirmwareCmd::Repair) {
+                drop(d);
+                repair_loop(&manager).await?;
+                return Ok(());
+            }
             let update = manager.check_firmware_update(&os).await?;
             match (cmd, update) {
+                (FirmwareCmd::Repair, _) => unreachable!(),
                 (_, None) => println!("firmware {} is up to date", os.se_version),
                 (FirmwareCmd::Check, Some(u)) => print(&u),
                 (FirmwareCmd::Update, Some(u)) => {
@@ -542,6 +550,33 @@ async fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Flash MCU / bootloader while the device stays in bootloader mode.
+async fn repair_loop(manager: &Manager) -> Result<()> {
+    for _ in 0..6 {
+        let d = Device::new(HidTransport::wait_and_open(Duration::from_secs(300))?);
+        let os = d.get_version().await?;
+        if !os.is_bootloader {
+            println!(
+                "device is out of bootloader mode (firmware {})",
+                os.se_version
+            );
+            return Ok(());
+        }
+        eprintln!(
+            "bootloader {}, installed firmware {}",
+            os.maj_min(),
+            os.se_version
+        );
+        let kind = manager.repair_mcu(&d, &mut progress).await?;
+        eprintln!("flashed {kind:?}, waiting for the device to restart...");
+        drop(d);
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    Err(Error::App(
+        "device still in bootloader mode after several flashes".into(),
+    ))
 }
 
 fn main() {

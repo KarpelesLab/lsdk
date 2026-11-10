@@ -40,19 +40,29 @@ const start = () => guard(async () => {
     log('ok', 'OS updater installed, the device installs the firmware and restarts')
   }
   await waitDevice('reboot')
-  if (u.shouldFlashMcu) {
-    for (let i = 0; i < 6 && state.info?.version?.isBootloader; i++) {
-      phase.value = 'mcu'
-      const kind = await run('flash MCU', (d) => d.flashMcu(u, hsmEvent), { retryOnDisconnect: false }).catch((e) => {
-        if (e?.kind !== 'Disconnected') throw e
-        return 'mcu'
-      })
-      log('ok', `${kind} flashed`)
-      await waitDevice('reboot')
-    }
-  }
+  await flashWhileBootloader()
   phase.value = 'done'
   update.value = undefined
+  log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
+})
+
+// While the device sits in bootloader mode, flash what its installed firmware
+// needs (MCU or bootloader), then wait for it to restart.
+async function flashWhileBootloader() {
+  for (let i = 0; i < 6 && state.info?.version?.isBootloader; i++) {
+    phase.value = 'mcu'
+    const kind = await run('flash MCU', (d) => d.repairMcu(hsmEvent), { retryOnDisconnect: false }).catch((e) => {
+      if (e?.kind !== 'Disconnected') throw e
+      return 'mcu'
+    })
+    log('ok', `${kind} flashed`)
+    await waitDevice('reboot')
+  }
+}
+
+const finish = () => guard(async () => {
+  await flashWhileBootloader()
+  phase.value = 'done'
   log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
 })
 </script>
@@ -67,9 +77,20 @@ const start = () => guard(async () => {
           <p class="muted small-text" style="margin:0">Current: <span class="mono">{{ v?.seVersion || v?.rawVersion || 'unknown' }}</span> · MCU <span class="mono">{{ v?.mcuSephVersion || '—' }}</span></p>
         </div>
         <div class="spacer"></div>
-        <button :disabled="!!state.busy || !v" @click="check">Check for updates</button>
+        <button :disabled="!!state.busy || !v || v.isBootloader" @click="check">Check for updates</button>
       </div>
       <p v-if="!v" class="note">Quit the running app first (Device tab).</p>
+    </div>
+
+    <div v-if="v?.isBootloader && !phase" class="panel">
+      <div class="row">
+        <div>
+          <h2>Device in bootloader mode</h2>
+          <p class="muted small-text" style="margin:0">A firmware update is in progress (installed firmware <span class="mono">{{ v.seVersion || '?' }}</span>, bootloader <span class="mono">{{ v.mcuBootloaderVersion }}</span>). Flash the MCU to finish it.</p>
+        </div>
+        <div class="spacer"></div>
+        <button class="primary" :disabled="!!state.busy" @click="finish">Finish update</button>
+      </div>
     </div>
 
     <div v-if="update === null" class="panel"><span class="badge ok">✓ up to date</span></div>
@@ -87,8 +108,9 @@ const start = () => guard(async () => {
         <li v-if="update.shouldFlashMcu" :class="{ on: phase === 'mcu' }">Flash the MCU from bootloader mode</li>
       </ol>
       <p v-if="phase === 'reboot'" class="note">
-        Waiting for the device… If it does not come back on its own once the device shows its dashboard
-        (or the bootloader screen), unplug/replug it, or click <b>Connect device</b> in the header and select it again.
+        Waiting for the device… When it restarts in bootloader mode it shows up as a new USB device the
+        browser has not authorized yet: click <b>Select device</b> in the header and pick it (it may be
+        listed as a "Bootloader"). The update then continues automatically.
       </p>
       <h3 v-if="update.osu.notes">Release notes</h3>
       <div v-if="update.osu.notes" class="notes md" v-html="notesHtml"></div>

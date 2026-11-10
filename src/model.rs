@@ -126,10 +126,13 @@ impl DeviceModel {
 
     /// Identify the model from a USB product id (OS or bootloader).
     pub fn from_product_id(pid: u16) -> Option<Self> {
+        // Bootloader product ids are not reliable to identify the model (a Nano
+        // S Plus bootloader can enumerate as 0x0001): use the target id instead.
         let hi = (pid >> 8) as u8;
-        Self::ALL
-            .into_iter()
-            .find(|m| m.usb_product_id() == hi || (hi == 0 && m.bootloader_product_id() == pid))
+        if hi == 0 {
+            return None;
+        }
+        Self::ALL.into_iter().find(|m| m.usb_product_id() == hi)
     }
 
     /// Identify the model from a target id.
@@ -188,10 +191,9 @@ mod tests {
             DeviceModel::from_product_id(0x4015),
             Some(DeviceModel::NanoX)
         );
-        assert_eq!(
-            DeviceModel::from_product_id(0x0005),
-            Some(DeviceModel::NanoSPlus)
-        );
+        assert_eq!(DeviceModel::from_product_id(0x0005), None);
+        assert_eq!(DeviceModel::from_product_id(0x0001), None);
+        assert!(DeviceModel::is_bootloader_product_id(0x0001));
         assert_eq!(
             DeviceModel::from_target_id(0x33100004),
             Some(DeviceModel::NanoSPlus)

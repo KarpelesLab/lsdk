@@ -228,6 +228,8 @@ impl WebHidTransport {
     }
 }
 
+// Dropping only detaches listeners: another transport may share the same
+// `HIDDevice` (re-opened after re-enumeration). Use `close()` to close it.
 impl Drop for WebHidTransport {
     fn drop(&mut self) {
         self.device
@@ -237,9 +239,6 @@ impl Drop for WebHidTransport {
             && let Ok(f) = f.dyn_into::<js_sys::Function>()
         {
             let _ = f.call2(&hid, &"disconnect".into(), self.on_disconnect.as_ref());
-        }
-        if self.device.opened() {
-            let _ = self.device.close();
         }
     }
 }

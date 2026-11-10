@@ -294,6 +294,12 @@ impl HwDevice {
             .map(|m| m.name().to_string())
     }
 
+    /// The underlying browser `HIDDevice` (to match `navigator.hid` events).
+    #[wasm_bindgen(getter, js_name = hidDevice)]
+    pub fn hid_device(&self) -> JsValue {
+        self.device.transport().device().clone().into()
+    }
+
     #[wasm_bindgen(getter)]
     pub fn disconnected(&self) -> bool {
         self.device.transport().is_disconnected()
@@ -451,6 +457,19 @@ impl HwDevice {
             &self
                 .manager()
                 .flash_mcu(&self.device, &u, &mut emitter(on_event))
+                .await
+                .map_err(js_err)?,
+        )
+    }
+
+    /// Bootloader mode recovery: flash the MCU required by the installed
+    /// firmware. Returns "mcu", "bootloader" or `null` if not in bootloader.
+    #[wasm_bindgen(js_name = repairMcu)]
+    pub async fn repair_mcu(&self, on_event: Option<Function>) -> JsResult<JsValue> {
+        to_js(
+            &self
+                .manager()
+                .repair_mcu(&self.device, &mut emitter(on_event))
                 .await
                 .map_err(js_err)?,
         )
