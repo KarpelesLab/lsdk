@@ -3,8 +3,9 @@
 use crate::apdu::{Apdu, Response, StatusWord};
 use crate::error::{Error, Result};
 use crate::os::{
-    self, AppAndVersion, BatteryStatus, BatteryStatusKind, InstalledApp, OsVersion, ScreenSaver,
-    ScreenSaverAnimation, ScreenSaverSpeed,
+    self, AppAndVersion, BatteryStatus, BatteryStatusKind, EndorsementInfo, EndorsementSlot,
+    InstalledApp, LanguagePack, OnboardIdentity, OsVersion, ScreenSaver, ScreenSaverAnimation,
+    ScreenSaverSpeed,
 };
 use crate::transport::Transport;
 
@@ -181,6 +182,137 @@ impl<T: Transport> Device<T> {
         } else {
             Err(Self::screen_saver_err(r.sw))
         }
+    }
+
+    fn check(&self, r: crate::apdu::Response) -> Result<Vec<u8>> {
+        match r.sw {
+            StatusWord::OK => Ok(r.data),
+            sw if sw.is_refused() => Err(Error::UserRefused),
+            sw => Err(sw.into()),
+        }
+    }
+
+    /// Restart the dashboard (`RESET`).
+    pub async fn reset(&self) -> Result<()> {
+        match self.exchange(&os::RESET).await {
+            Ok(r) => self.check(r).map(|_| ()),
+            Err(Error::Disconnected) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Bluetooth MAC address (BLE models), as `aa:bb:cc:dd:ee:ff`.
+    pub async fn get_device_mac(&self) -> Result<String> {
+        let d = self.check(self.exchange(&os::GET_DEVICE_MAC).await?)?;
+        Ok(d.iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(":"))
+    }
+
+    /// Set the battery charge limit (percent, models with a battery).
+    pub async fn set_battery_charge_limit(&self, percent: u8) -> Result<()> {
+        self.check(
+            self.exchange(&os::set_battery_charge_limit(percent)?)
+                .await?,
+        )
+        .map(|_| ())
+    }
+
+    /// Installed language packs.
+    pub async fn list_language_packs(&self) -> Result<Vec<LanguagePack>> {
+        let mut out = Vec::new();
+        let mut first = true;
+        loop {
+            let d = self.check(self.exchange(&os::list_language_packs(first)).await?)?;
+            match os::parse_language_pack(&d)? {
+                Some(p) => out.push(p),
+                None => break,
+            }
+            first = false;
+            if out.len() > 32 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Remove a language pack (the device may ask for confirmation).
+    pub async fn delete_language_pack(&self, language: u8) -> Result<()> {
+        self.check(self.exchange(&os::delete_language_pack(language)).await?)
+            .map(|_| ())
+    }
+
+    /// Endorsement key and certificate of a slot.
+    pub async fn endorsement_info(&self, slot: EndorsementSlot) -> Result<EndorsementInfo> {
+        EndorsementInfo::parse(&self.check(self.exchange(&os::endorsement_info(slot)).await?)?)
+    }
+
+    /// Start an endorsement: the device generates the slot key and returns
+    /// `(public_key, device_signature)`; the signature (by the device
+    /// attestation key) covers `sha256(0xFF || public_key)`.
+    pub async fn endorse_start(&self, slot: EndorsementSlot) -> Result<(Vec<u8>, Vec<u8>)> {
+        let d = self.check(self.exchange(&os::endorse_set_start(slot)).await?)?;
+        if d.len() < 65 {
+            return Err(Error::InvalidResponse("short endorsement key".into()));
+        }
+        Ok((d[..65].to_vec(), d[65..].to_vec()))
+    }
+
+    /// Finish an endorsement with the owner certificate (DER signature over
+    /// `sha256(0xFE || public_key)`).
+    pub async fn endorse_commit(&self, certificate: &[u8]) -> Result<()> {
+        self.check(self.exchange(&os::endorse_set_commit(certificate)).await?)
+            .map(|_| ())
+    }
+
+    /// Onboard from the host. **Sends the PIN and recovery phrase in clear
+    /// over USB**: test devices only.
+    pub async fn onboard(
+        &self,
+        identity: OnboardIdentity,
+        pin: &str,
+        prefix: &str,
+        passphrase: &str,
+        words: &str,
+    ) -> Result<()> {
+        self.check(
+            self.exchange(&os::onboard(identity, pin, prefix, passphrase, words)?)
+                .await?,
+        )
+        .map(|_| ())
+    }
+
+    /// Factory personalization: device public key, serial and certificate
+    /// request (devices not yet personalized only).
+    pub async fn factory_get_device_public_key(&self) -> Result<Vec<u8>> {
+        self.check(self.exchange(&os::GET_DEVICE_PUBLIC_KEY).await?)
+    }
+
+    /// Factory test command (`E0 44`, devices without serial number only).
+    pub async fn factory_test(&self, p1: u8, p2: u8, data: &[u8]) -> Result<Vec<u8>> {
+        self.check(self.exchange(&os::factory_test(p1, p2, data)).await?)
+    }
+
+    /// Factory: read the cryptographic port rights (`E0 C5`).
+    pub async fn factory_get_cxport(&self) -> Result<Vec<u8>> {
+        self.check(self.exchange(&os::GET_CXPORT).await?)
+    }
+
+    /// Factory: `SET_CERTIFICATE` (`E0 41`, raw payload).
+    pub async fn factory_set_certificate(&self, p2: u8, data: &[u8]) -> Result<Vec<u8>> {
+        self.check(
+            self.exchange(&Apdu::with_data(0xe0, 0x41, 0x00, p2, data.to_vec()))
+                .await?,
+        )
+    }
+
+    /// Factory: `SET_CXPORT` (`E0 C4`, raw payload).
+    pub async fn factory_set_cxport(&self, data: &[u8]) -> Result<Vec<u8>> {
+        self.check(
+            self.exchange(&Apdu::with_data(0xe0, 0xc4, 0x00, 0x00, data.to_vec()))
+                .await?,
+        )
     }
 
     /// Query one battery metric (raw payload).

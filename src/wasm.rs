@@ -60,6 +60,22 @@ fn path(s: &str) -> JsResult<DerivationPath> {
     s.parse().map_err(js_err)
 }
 
+fn endorsement_slot(n: u8) -> JsResult<crate::os::EndorsementSlot> {
+    match n {
+        1 => Ok(crate::os::EndorsementSlot::Slot1),
+        2 => Ok(crate::os::EndorsementSlot::Slot2),
+        _ => Err(js_err(Error::InvalidInput("slot must be 1 or 2".into()))),
+    }
+}
+
+fn scp_emitter(cb: &Option<Function>) -> impl FnMut(crate::scp::ScpEvent) + '_ {
+    move |ev| {
+        if let (Some(cb), Ok(v)) = (cb, to_js(&ev)) {
+            let _ = cb.call1(&JsValue::NULL, &v);
+        }
+    }
+}
+
 fn emitter(cb: Option<Function>) -> impl FnMut(HsmEvent) {
     move |ev: HsmEvent| {
         if let Some(cb) = &cb
@@ -98,6 +114,41 @@ pub fn btc_derive_addresses(
         out.push(addr);
     }
     to_js(&out)
+}
+
+/// Generate a CA / root key. Returns `{ privateKey, publicKey }` (hex).
+#[wasm_bindgen(js_name = generateRootKey)]
+pub fn generate_root_key() -> JsResult<JsValue> {
+    let k = crate::scp::RootKey::generate().map_err(js_err)?;
+    to_js(
+        &serde_json::json!({ "privateKey": hex::encode(k.to_bytes()), "publicKey": hex::encode(k.public_key()) }),
+    )
+}
+
+/// Public key (hex) of a private key (hex).
+#[wasm_bindgen(js_name = rootPublicKey)]
+pub fn root_public_key(private_key: &str) -> JsResult<String> {
+    Ok(hex::encode(
+        crate::scp::RootKey::from_hex(private_key)
+            .map_err(js_err)?
+            .public_key(),
+    ))
+}
+
+/// Metadata of an app ELF (name, version, flags, API level, target id...).
+#[wasm_bindgen(js_name = appImageInfo)]
+pub fn app_image_info(elf: &[u8]) -> JsResult<JsValue> {
+    let img = crate::loader::AppImage::from_elf(elf).map_err(js_err)?;
+    let mut v = serde_json::to_value(&img).map_err(|e| js_err(Error::App(e.to_string())))?;
+    v["imageSize"] = img.image_size().into();
+    to_js(&v)
+}
+
+fn root_or_random(key: Option<String>) -> Result<crate::scp::RootKey> {
+    match key.filter(|k| !k.trim().is_empty()) {
+        Some(k) => crate::scp::RootKey::from_hex(&k),
+        None => crate::scp::RootKey::generate(),
+    }
 }
 
 /// Estimated virtual size of a single-sig transaction.
@@ -545,6 +596,294 @@ impl HwDevice {
                 .await
                 .map_err(js_err)?,
         )
+    }
+
+    // ---- Device settings ----
+
+    /// Restart the dashboard.
+    pub async fn reset(&self) -> JsResult<()> {
+        self.device.reset().await.map_err(js_err)
+    }
+
+    /// Bluetooth MAC address (BLE models).
+    #[wasm_bindgen(js_name = getMac)]
+    pub async fn get_mac(&self) -> JsResult<String> {
+        self.device.get_device_mac().await.map_err(js_err)
+    }
+
+    /// Battery charge limit (percent).
+    #[wasm_bindgen(js_name = setChargeLimit)]
+    pub async fn set_charge_limit(&self, percent: u8) -> JsResult<()> {
+        self.device
+            .set_battery_charge_limit(percent)
+            .await
+            .map_err(js_err)
+    }
+
+    // ---- Language packs ----
+
+    /// Installed language packs `[{id, size}]`.
+    #[wasm_bindgen(js_name = listLanguagePacks)]
+    pub async fn list_language_packs(&self) -> JsResult<JsValue> {
+        to_js(&self.device.list_language_packs().await.map_err(js_err)?)
+    }
+
+    /// Language packs available for this firmware.
+    #[wasm_bindgen(js_name = availableLanguagePacks)]
+    pub async fn available_language_packs(&self) -> JsResult<JsValue> {
+        let os = self.device.get_version().await.map_err(js_err)?;
+        to_js(&self.manager().language_packs(&os).await.map_err(js_err)?)
+    }
+
+    /// Install a language pack by name (`french`...). Progress: `(sent, total)`.
+    #[wasm_bindgen(js_name = installLanguagePack)]
+    pub async fn install_language_pack(
+        &self,
+        language: String,
+        on_progress: Option<Function>,
+    ) -> JsResult<()> {
+        let os = self.device.get_version().await.map_err(js_err)?;
+        let m = self.manager();
+        let pack = m
+            .language_packs(&os)
+            .await
+            .map_err(js_err)?
+            .into_iter()
+            .find(|p| p.language.eq_ignore_ascii_case(&language))
+            .ok_or_else(|| {
+                js_err(Error::NotFound(format!(
+                    "no {language} pack for this firmware"
+                )))
+            })?;
+        let mut cb = |i: usize, n: usize| {
+            if let Some(f) = &on_progress {
+                let _ = f.call2(&JsValue::NULL, &(i as u32).into(), &(n as u32).into());
+            }
+        };
+        m.install_language_pack(&self.device, &pack, &mut cb)
+            .await
+            .map_err(js_err)
+    }
+
+    /// Remove every language pack (back to English).
+    #[wasm_bindgen(js_name = removeLanguagePacks)]
+    pub async fn remove_language_packs(&self) -> JsResult<()> {
+        self.manager()
+            .remove_language_packs(&self.device)
+            .await
+            .map_err(js_err)
+    }
+
+    // ---- Endorsement ----
+
+    /// Endorsement key and certificate of slot 1 or 2.
+    #[wasm_bindgen(js_name = endorsementInfo)]
+    pub async fn endorsement_info(&self, slot: u8) -> JsResult<JsValue> {
+        to_js(
+            &self
+                .device
+                .endorsement_info(endorsement_slot(slot)?)
+                .await
+                .map_err(js_err)?,
+        )
+    }
+
+    /// Create the slot key and certify it with `ownerKey` (hex private key).
+    /// Returns `{ publicKey, certificate }`.
+    #[wasm_bindgen(js_name = endorseSetup)]
+    pub async fn endorse_setup(&self, slot: u8, owner_key: String) -> JsResult<JsValue> {
+        let owner = crate::scp::RootKey::from_hex(&owner_key).map_err(js_err)?;
+        let (public, _) = self
+            .device
+            .endorse_start(endorsement_slot(slot)?)
+            .await
+            .map_err(js_err)?;
+        let cert = crate::scp::endorsement_certificate(&owner, &public).map_err(js_err)?;
+        self.device.endorse_commit(&cert).await.map_err(js_err)?;
+        to_js(
+            &serde_json::json!({ "publicKey": hex::encode(&public), "certificate": hex::encode(&cert) }),
+        )
+    }
+
+    // ---- Secure channel (custom CA, sideloading) ----
+
+    /// Install a custom CA (recovery mode). `recover` uses the Recover channel.
+    #[wasm_bindgen(js_name = caInstall)]
+    pub async fn ca_install(
+        &self,
+        name: String,
+        public_key: String,
+        recover: bool,
+        on_event: Option<Function>,
+    ) -> JsResult<()> {
+        let pk = hex::decode(public_key.trim().trim_start_matches("0x"))
+            .map_err(|e| js_err(Error::InvalidInput(e.to_string())))?;
+        let root = crate::scp::RootKey::generate().map_err(js_err)?;
+        let mode = if recover {
+            crate::scp::ScpMode::Recover
+        } else {
+            crate::scp::ScpMode::Default
+        };
+        let mut chan = crate::scp::SecureChannel::open_mode(
+            &self.device,
+            &root,
+            mode,
+            &mut scp_emitter(&on_event),
+        )
+        .await
+        .map_err(js_err)?;
+        if recover {
+            chan.recover_set_ca(&name, &pk).await
+        } else {
+            chan.setup_custom_ca(&name, &pk).await
+        }
+        .map_err(js_err)
+    }
+
+    /// Remove the custom CA (recovery mode). The Recover channel needs the
+    /// CA name and public key.
+    #[wasm_bindgen(js_name = caRemove)]
+    pub async fn ca_remove(
+        &self,
+        recover: bool,
+        name: Option<String>,
+        public_key: Option<String>,
+        on_event: Option<Function>,
+    ) -> JsResult<()> {
+        let root = crate::scp::RootKey::generate().map_err(js_err)?;
+        if recover {
+            let pk = hex::decode(
+                public_key
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_start_matches("0x"),
+            )
+            .map_err(|e| js_err(Error::InvalidInput(e.to_string())))?;
+            let mut chan = crate::scp::SecureChannel::open_mode(
+                &self.device,
+                &root,
+                crate::scp::ScpMode::Recover,
+                &mut scp_emitter(&on_event),
+            )
+            .await
+            .map_err(js_err)?;
+            chan.recover_delete_ca(&name.unwrap_or_default(), &pk)
+                .await
+                .map_err(js_err)
+        } else {
+            let mut chan =
+                crate::scp::SecureChannel::open(&self.device, &root, &mut scp_emitter(&on_event))
+                    .await
+                    .map_err(js_err)?;
+            chan.reset_custom_ca().await.map_err(js_err)
+        }
+    }
+
+    /// Run a secure command set with `rootKey` (hex; empty = random key, the
+    /// device then asks to allow an unknown manager). `op`: `memoryInfo`,
+    /// `listApps`, `hashFirmware`, `deleteAllApps`, `resetEndorsement`,
+    /// `deleteApp` (arg: name), `deleteAppByHash` (arg: hex hash).
+    pub async fn secure(
+        &self,
+        op: String,
+        root_key: Option<String>,
+        arg: Option<String>,
+        on_event: Option<Function>,
+    ) -> JsResult<JsValue> {
+        let root = root_or_random(root_key).map_err(js_err)?;
+        let mut chan =
+            crate::scp::SecureChannel::open(&self.device, &root, &mut scp_emitter(&on_event))
+                .await
+                .map_err(js_err)?;
+        let arg = arg.unwrap_or_default();
+        let r: Result<JsValue> = match op.as_str() {
+            "memoryInfo" => chan
+                .get_memory_info()
+                .await
+                .and_then(|v| to_js(&v).map_err(|_| Error::App("js".into()))),
+            "listApps" => chan
+                .list_apps()
+                .await
+                .and_then(|v| to_js(&v).map_err(|_| Error::App("js".into()))),
+            "hashFirmware" => chan.hash_firmware().await.map(|h| hex::encode(h).into()),
+            "deleteAllApps" => chan.delete_all_apps().await.map(|_| JsValue::UNDEFINED),
+            "resetEndorsement" => chan.reset_endorsement().await.map(|_| JsValue::UNDEFINED),
+            "deleteApp" => chan.delete_app(&arg).await.map(|_| JsValue::UNDEFINED),
+            "deleteAppByHash" => {
+                let h: [u8; 32] = hex::decode(arg.trim())
+                    .ok()
+                    .and_then(|v| v.try_into().ok())
+                    .ok_or_else(|| {
+                        js_err(Error::InvalidInput("hash must be 32 bytes hex".into()))
+                    })?;
+                chan.delete_app_by_hash(&h)
+                    .await
+                    .map(|_| JsValue::UNDEFINED)
+            }
+            other => Err(Error::InvalidInput(format!(
+                "unknown secure operation {other:?}"
+            ))),
+        };
+        r.map_err(js_err)
+    }
+
+    /// Sideload an app ELF with the custom CA private key (hex).
+    /// Events: handshake events, then `{type: "loading", sent, total}`.
+    #[wasm_bindgen(js_name = sideload)]
+    pub async fn sideload(
+        &self,
+        elf: Vec<u8>,
+        ca_key: String,
+        replace: bool,
+        on_event: Option<Function>,
+    ) -> JsResult<()> {
+        let img = crate::loader::AppImage::from_elf(&elf).map_err(js_err)?;
+        let root = crate::scp::RootKey::from_hex(&ca_key).map_err(js_err)?;
+        let mut chan =
+            crate::scp::SecureChannel::open(&self.device, &root, &mut scp_emitter(&on_event))
+                .await
+                .map_err(js_err)?;
+        let mut progress = |sent: usize, total: usize| {
+            if let Some(f) = &on_event {
+                let v = serde_json::json!({ "type": "loading", "sent": sent, "total": total });
+                if let Ok(v) = to_js(&v) {
+                    let _ = f.call1(&JsValue::NULL, &v);
+                }
+            }
+        };
+        crate::loader::install_app(&mut chan, &img, replace, &mut progress)
+            .await
+            .map_err(js_err)
+    }
+
+    // ---- Factory (devices not yet personalized) ----
+
+    /// `FACTORY_TEST` raw (hex data), returns hex.
+    #[wasm_bindgen(js_name = factoryTest)]
+    pub async fn factory_test(&self, p1: u8, p2: u8, data: String) -> JsResult<String> {
+        let d = hex::decode(data.trim()).map_err(|e| js_err(Error::InvalidInput(e.to_string())))?;
+        Ok(hex::encode(
+            self.device.factory_test(p1, p2, &d).await.map_err(js_err)?,
+        ))
+    }
+
+    /// `GET_DEVICE_PUBLIC_KEY` (personalization), hex.
+    #[wasm_bindgen(js_name = factoryPublicKey)]
+    pub async fn factory_public_key(&self) -> JsResult<String> {
+        Ok(hex::encode(
+            self.device
+                .factory_get_device_public_key()
+                .await
+                .map_err(js_err)?,
+        ))
+    }
+
+    /// `GET_CXPORT`, hex.
+    #[wasm_bindgen(js_name = factoryCxport)]
+    pub async fn factory_cxport(&self) -> JsResult<String> {
+        Ok(hex::encode(
+            self.device.factory_get_cxport().await.map_err(js_err)?,
+        ))
     }
 
     // ---- Ethereum ----

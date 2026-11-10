@@ -18,7 +18,7 @@
 //! `E0 00 00 00 Lc AES-CBC(pad(ins || data)) || CBC-MAC[-14..]`, with the
 //! IVs chained across the session in both directions.
 
-use purecrypto::cipher::{Aes128, BlockCipher};
+use purecrypto::cipher::{Aes128, Aes256, AesSiv, BlockCipher};
 use purecrypto::ec::secp256k1::{AffinePoint, ProjectivePoint, Scalar};
 use purecrypto::ec::{Secp256k1EcdsaPrivateKey, Secp256k1EcdsaPublicKey};
 use purecrypto::hash::{Sha256, sha256};
@@ -51,6 +51,11 @@ pub mod ins {
     pub const DELETE_APP_BY_HASH: u8 = 0x15;
     pub const RESET_ENDORSEMENT: u8 = 0x16;
     pub const HASH_FIRMWARE: u8 = 0x17;
+    pub const MCU_BOOTLOADER: u8 = 0xb0;
+    /// Recover channel only.
+    pub const RECOVER_SET_CA: u8 = 0xd2;
+    /// Recover channel only.
+    pub const RECOVER_DELETE_CA: u8 = 0xd3;
 }
 
 /// A host root key (secp256k1). Use the custom CA private key to be allowed
@@ -106,6 +111,26 @@ impl core::fmt::Debug for RootKey {
     }
 }
 
+/// Owner certificate for an endorsement key: DER signature by `owner` over
+/// `sha256(0xFE || endorsement_public_key)`.
+pub fn endorsement_certificate(owner: &RootKey, endorsement_public_key: &[u8]) -> Result<Vec<u8>> {
+    let mut d = vec![0xfe];
+    d.extend_from_slice(endorsement_public_key);
+    owner.sign(&d)
+}
+
+/// Check the device signature of a new endorsement key: by the device
+/// attestation key over `sha256(0xFF || endorsement_public_key)`.
+pub fn verify_endorsement_key(
+    device_public_key: &[u8],
+    endorsement_public_key: &[u8],
+    device_signature: &[u8],
+) -> bool {
+    let mut d = vec![0xff];
+    d.extend_from_slice(endorsement_public_key);
+    verify(device_public_key, &d, device_signature)
+}
+
 /// Events during the handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -153,14 +178,45 @@ pub struct SecureAppEntry {
 /// An open secure channel.
 pub struct SecureChannel<'d, T: Transport> {
     device: &'d Device<T>,
-    enc: Aes128,
-    mac: Aes128,
-    enc_iv: [u8; 16],
-    mac_iv: [u8; 16],
+    session: Session,
     /// Device attestation public key (from its factory certificate).
     pub device_public_key: Vec<u8>,
     /// Firmware information read before the handshake.
     pub version: OsVersion,
+}
+
+/// Secure channel flavor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub enum ScpMode {
+    /// Regular manager channel (AES-CBC + CBC-MAC).
+    Default,
+    /// Recover channel (AES-SIV): custom CA management in recovery mode.
+    Recover,
+}
+
+enum Session {
+    Default {
+        enc: Aes128,
+        mac: Aes128,
+        enc_iv: [u8; 16],
+        mac_iv: [u8; 16],
+    },
+    Recover {
+        siv: AesSiv,
+    },
+}
+
+fn ecdh_x(private: &RootKeyScalar, public: &[u8]) -> Result<[u8; 32]> {
+    let p = AffinePoint::from_sec1(public)
+        .map_err(|_| Error::InvalidResponse("bad device ephemeral key".into()))?;
+    let q = p
+        .to_projective()
+        .mul(&private.0)
+        .to_affine()
+        .ok_or_else(|| Error::App("ECDH failed".into()))?;
+    Ok(q.x_bytes())
 }
 
 fn ecdh_secret(private: &RootKeyScalar, public: &[u8]) -> Result<[u8; 32]> {
@@ -206,10 +262,20 @@ fn xor16(a: &mut [u8; 16], b: &[u8]) {
 }
 
 impl<'d, T: Transport> SecureChannel<'d, T> {
-    /// Run the handshake with `root` as the host authority.
+    /// Open a default channel with `root` as the host authority.
     pub async fn open(
         device: &'d Device<T>,
         root: &RootKey,
+        on_event: &mut dyn FnMut(ScpEvent),
+    ) -> Result<Self> {
+        Self::open_mode(device, root, ScpMode::Default, on_event).await
+    }
+
+    /// Open a channel of the given mode.
+    pub async fn open_mode(
+        device: &'d Device<T>,
+        root: &RootKey,
+        mode: ScpMode,
         on_event: &mut dyn FnMut(ScpEvent),
     ) -> Result<Self> {
         if !device.is_on_dashboard().await? {
@@ -226,12 +292,13 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
                 sw.into()
             }
         };
+        let recover = mode == ScpMode::Recover;
 
         device
             .send(&Apdu::with_data(
                 0xe0,
                 0x04,
-                0x00,
+                if recover { 0x02 } else { 0x00 },
                 0x00,
                 version.target_id.to_be_bytes().to_vec(),
             ))
@@ -295,16 +362,57 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             ))
             .await?;
 
-        // Device certificate chain.
-        let cert = device.send(&Apdu::new(0xe0, 0x52, 0x00, 0x00)).await?;
-        let mut rd = Reader::new(&cert);
-        let _header = rd.lv()?;
-        let device_public_key = rd.lv()?.to_vec();
+        // Device certificates.
+        let static_cert = device.send(&Apdu::new(0xe0, 0x52, 0x00, 0x00)).await?;
         let eph_cert = device.send(&Apdu::new(0xe0, 0x52, 0x80, 0x00)).await?;
         let mut rd = Reader::new(&eph_cert);
         let _h = rd.lv()?;
         let dev_eph = rd.lv()?.to_vec();
-        let dev_eph_sig = rd.lv()?.to_vec();
+        let mut dev_eph_sig = rd.lv()?.to_vec();
+        Secp256k1EcdsaPublicKey::from_sec1(&dev_eph)
+            .map_err(|_| Error::InvalidResponse("bad device key".into()))?;
+        let scalar = Scalar::from_bytes_be(&eph.to_bytes())
+            .map_err(|_| Error::App("bad ephemeral key".into()))?;
+
+        let (session, static_cert) = if recover {
+            // secret = sha256(x || 00000001); SIV key from AES-256-ECB blocks.
+            let x = ecdh_x(&RootKeyScalar(scalar), &dev_eph)?;
+            let mut buf = x.to_vec();
+            buf.extend_from_slice(&[0, 0, 0, 1]);
+            let secret = sha256(&buf);
+            let aes = Aes256::new(&secret);
+            let mut key = [0u8; 32];
+            let (mut b1, mut b2) = ([1u8; 16], [2u8; 16]);
+            aes.encrypt_block(&mut b1);
+            aes.encrypt_block(&mut b2);
+            key[..16].copy_from_slice(&b1);
+            key[16..].copy_from_slice(&b2);
+            let siv = AesSiv::new(&key);
+            let open = |c: &[u8]| {
+                siv.open(&[], c)
+                    .map_err(|_| Error::InvalidResponse("cannot decrypt device certificate".into()))
+            };
+            let static_cert = open(&static_cert)?;
+            dev_eph_sig = open(&dev_eph_sig)?;
+            (Session::Recover { siv }, static_cert)
+        } else {
+            let secret = ecdh_secret(&RootKeyScalar(scalar), &dev_eph)?;
+            let enc = Aes128::new(&derive_key(&secret, 0)?);
+            let mac = Aes128::new(&derive_key(&secret, 1)?);
+            (
+                Session::Default {
+                    enc,
+                    mac,
+                    enc_iv: [0; 16],
+                    mac_iv: [0; 16],
+                },
+                static_cert,
+            )
+        };
+
+        let mut rd = Reader::new(&static_cert);
+        let _header = rd.lv()?;
+        let device_public_key = rd.lv()?.to_vec();
         let mut signed = vec![0x12];
         signed.extend_from_slice(&device_nonce);
         signed.extend_from_slice(&host_nonce);
@@ -314,29 +422,35 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
                 "device ephemeral key signature is invalid".into(),
             ));
         }
-        Secp256k1EcdsaPublicKey::from_sec1(&dev_eph)
-            .map_err(|_| Error::InvalidResponse("bad device key".into()))?;
 
         device.send(&Apdu::new(0xe0, 0x53, 0x00, 0x00)).await?;
-
-        let scalar = Scalar::from_bytes_be(&eph.to_bytes())
-            .map_err(|_| Error::App("bad ephemeral key".into()))?;
-        let secret = ecdh_secret(&RootKeyScalar(scalar), &dev_eph)?;
-        let enc = Aes128::new(&derive_key(&secret, 0)?);
-        let mac = Aes128::new(&derive_key(&secret, 1)?);
         on_event(ScpEvent::Opened);
         Ok(Self {
             device,
-            enc,
-            mac,
-            enc_iv: [0; 16],
-            mac_iv: [0; 16],
+            session,
             device_public_key,
             version,
         })
     }
 
+    /// Channel flavor.
+    pub fn mode(&self) -> ScpMode {
+        match self.session {
+            Session::Default { .. } => ScpMode::Default,
+            Session::Recover { .. } => ScpMode::Recover,
+        }
+    }
+
     fn wrap(&mut self, plain: &[u8]) -> Vec<u8> {
+        let (enc, mac, enc_iv, mac_iv) = match &mut self.session {
+            Session::Recover { siv } => return siv.seal(&[], plain),
+            Session::Default {
+                enc,
+                mac,
+                enc_iv,
+                mac_iv,
+            } => (enc, mac, enc_iv, mac_iv),
+        };
         let mut data = plain.to_vec();
         data.push(0x80);
         while !data.len().is_multiple_of(16) {
@@ -345,19 +459,19 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         // CBC encrypt, chaining enc_iv.
         for chunk in data.chunks_mut(16) {
             let mut block: [u8; 16] = chunk.try_into().unwrap();
-            xor16(&mut block, &self.enc_iv);
-            self.enc.encrypt_block(&mut block);
+            xor16(&mut block, enc_iv);
+            enc.encrypt_block(&mut block);
             chunk.copy_from_slice(&block);
-            self.enc_iv = block;
+            *enc_iv = block;
         }
         // CBC-MAC over the ciphertext, chaining mac_iv.
         for chunk in data.chunks(16) {
-            let mut block = self.mac_iv;
+            let mut block = *mac_iv;
             xor16(&mut block, chunk);
-            self.mac.encrypt_block(&mut block);
-            self.mac_iv = block;
+            mac.encrypt_block(&mut block);
+            *mac_iv = block;
         }
-        data.extend_from_slice(&self.mac_iv[16 - MAC_LEN..]);
+        data.extend_from_slice(&mac_iv[16 - MAC_LEN..]);
         data
     }
 
@@ -365,26 +479,39 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         if data.is_empty() {
             return Ok(Vec::new());
         }
+        let (enc, mac, enc_iv, mac_iv) = match &mut self.session {
+            Session::Recover { siv } => {
+                return siv
+                    .open(&[], data)
+                    .map_err(|_| Error::InvalidResponse("secure channel tag mismatch".into()));
+            }
+            Session::Default {
+                enc,
+                mac,
+                enc_iv,
+                mac_iv,
+            } => (enc, mac, enc_iv, mac_iv),
+        };
         if data.len() < MAC_LEN + 16 || !(data.len() - MAC_LEN).is_multiple_of(16) {
             return Err(Error::InvalidResponse("bad secure response length".into()));
         }
         let (body, tag) = data.split_at(data.len() - MAC_LEN);
         for chunk in body.chunks(16) {
-            let mut block = self.mac_iv;
+            let mut block = *mac_iv;
             xor16(&mut block, chunk);
-            self.mac.encrypt_block(&mut block);
-            self.mac_iv = block;
+            mac.encrypt_block(&mut block);
+            *mac_iv = block;
         }
-        if self.mac_iv[16 - MAC_LEN..] != *tag {
+        if mac_iv[16 - MAC_LEN..] != *tag {
             return Err(Error::InvalidResponse("secure channel MAC mismatch".into()));
         }
         let mut out = Vec::with_capacity(body.len());
         for chunk in body.chunks(16) {
             let c: [u8; 16] = chunk.try_into().unwrap();
             let mut block = c;
-            self.enc.decrypt_block(&mut block);
-            xor16(&mut block, &self.enc_iv);
-            self.enc_iv = c;
+            enc.decrypt_block(&mut block);
+            xor16(&mut block, enc_iv);
+            *enc_iv = c;
             out.extend_from_slice(&block);
         }
         let end = out
@@ -493,21 +620,11 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         self.exchange(ins::HASH_FIRMWARE, &[]).await
     }
 
-    /// Install a custom CA (recovery mode; the device asks for confirmation).
+    /// Install a custom CA over the default channel (recovery mode; the
+    /// device asks for confirmation). See also [`Self::recover_set_ca`].
     /// Its private key can then open channels allowed to install apps.
     pub async fn setup_custom_ca(&mut self, name: &str, public_key: &[u8]) -> Result<()> {
-        if name.is_empty() || name.len() > 32 {
-            return Err(Error::InvalidInput("CA name must be 1..=32 bytes".into()));
-        }
-        if public_key.len() != 65 || public_key[0] != 0x04 {
-            return Err(Error::InvalidInput(
-                "CA public key must be 65 bytes uncompressed (04...)".into(),
-            ));
-        }
-        let mut d = vec![name.len() as u8];
-        d.extend_from_slice(name.as_bytes());
-        d.push(public_key.len() as u8);
-        d.extend_from_slice(public_key);
+        let d = Self::name_key(name, public_key)?;
         self.exchange(ins::SETUP_CUSTOM_CERTIFICATE, &d)
             .await
             .map(|_| ())
@@ -520,6 +637,34 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             .map(|_| ())
     }
 
+    fn name_key(name: &str, public_key: &[u8]) -> Result<Vec<u8>> {
+        if name.is_empty() || name.len() > 32 {
+            return Err(Error::InvalidInput("CA name must be 1..=32 bytes".into()));
+        }
+        if public_key.len() != 65 || public_key[0] != 0x04 {
+            return Err(Error::InvalidInput(
+                "CA public key must be 65 bytes uncompressed (04...)".into(),
+            ));
+        }
+        let mut d = vec![name.len() as u8];
+        d.extend_from_slice(name.as_bytes());
+        d.push(public_key.len() as u8);
+        d.extend_from_slice(public_key);
+        Ok(d)
+    }
+
+    /// Install a custom CA through the Recover channel (recovery mode).
+    pub async fn recover_set_ca(&mut self, name: &str, public_key: &[u8]) -> Result<()> {
+        let d = Self::name_key(name, public_key)?;
+        self.exchange(ins::RECOVER_SET_CA, &d).await.map(|_| ())
+    }
+
+    /// Delete the custom CA through the Recover channel (recovery mode).
+    pub async fn recover_delete_ca(&mut self, name: &str, public_key: &[u8]) -> Result<()> {
+        let d = Self::name_key(name, public_key)?;
+        self.exchange(ins::RECOVER_DELETE_CA, &d).await.map(|_| ())
+    }
+
     /// Remove the user endorsement certificates.
     pub async fn reset_endorsement(&mut self) -> Result<()> {
         self.exchange(ins::RESET_ENDORSEMENT, &[]).await.map(|_| ())
@@ -529,6 +674,20 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aes_siv_rfc5297() {
+        // RFC 5297 A.1, to pin the SIV conventions used by the Recover channel.
+        let key = hex::decode("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            .unwrap();
+        let ad = hex::decode("101112131415161718191a1b1c1d1e1f2021222324252627").unwrap();
+        let pt = hex::decode("112233445566778899aabbccddee").unwrap();
+        let out = AesSiv::new(&key).seal(&[&ad], &pt);
+        assert_eq!(
+            hex::encode(out),
+            "85632d07c6e8f37f950acd320a2ecc9340c02b9690c4dc04daef7f6afe5c"
+        );
+    }
 
     #[test]
     fn wrap_unwrap_roundtrip() {

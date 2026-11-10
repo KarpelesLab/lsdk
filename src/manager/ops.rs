@@ -9,7 +9,8 @@ use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::hsm::{self, HsmEvent};
 use crate::manager::api::{
-    self, Application, DeviceVersion, FinalFirmware, ManagerApi, McuVersion, OsuFirmware,
+    self, Application, DeviceVersion, FinalFirmware, LanguagePackage, ManagerApi, McuVersion,
+    OsuFirmware,
 };
 use crate::os::{InstalledApp, OsVersion};
 use crate::transport::Transport;
@@ -506,5 +507,65 @@ impl Manager {
             }),
             Err(e) => Err(e),
         }
+    }
+
+    /// Language packs available for the device's firmware.
+    pub async fn language_packs(&self, os: &OsVersion) -> Result<Vec<LanguagePackage>> {
+        let provider = os.provider_id();
+        let dv = self.api.get_device_version(os.target_id, provider).await?;
+        let fw = self
+            .api
+            .get_firmware_version(dv.id, &os.version(), provider)
+            .await?;
+        self.api.get_language_packages(dv.id, fw.id).await
+    }
+
+    /// Install a language pack: removes the installed packs (one at a time
+    /// is supported), then replays the signed install script.
+    /// `on_progress(sent, total)` counts APDUs.
+    pub async fn install_language_pack<T: Transport>(
+        &self,
+        device: &Device<T>,
+        pack: &LanguagePackage,
+        on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<()> {
+        self.ensure_dashboard(device).await?;
+        let script = self.api.fetch_text(&pack.apdu_install_url).await?;
+        let apdus: Vec<Vec<u8>> = script
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(hex::decode)
+            .collect::<core::result::Result<_, _>>()
+            .map_err(|e| Error::InvalidResponse(format!("language pack script: {e}")))?;
+        if apdus.is_empty() {
+            return Err(Error::InvalidResponse("empty language pack script".into()));
+        }
+        for installed in device.list_language_packs().await? {
+            device.delete_language_pack(installed.id as u8).await?;
+        }
+        let total = apdus.len();
+        for (i, apdu) in apdus.iter().enumerate() {
+            let r = crate::apdu::Response::from_raw(device.exchange_raw(apdu).await?)?;
+            match r.sw.0 {
+                0x9000 => {}
+                0x6985 | 0x5501 => return Err(Error::UserRefused),
+                0x6a84 | 0x5102 => {
+                    return Err(Error::App("not enough space for the language pack".into()));
+                }
+                _ => return Err(r.sw.into()),
+            }
+            on_progress(i + 1, total);
+        }
+        Ok(())
+    }
+
+    /// Remove every language pack (back to English).
+    pub async fn remove_language_packs<T: Transport>(&self, device: &Device<T>) -> Result<()> {
+        self.ensure_dashboard(device).await?;
+        for installed in device.list_language_packs().await? {
+            device.delete_language_pack(installed.id as u8).await?;
+        }
+        Ok(())
     }
 }

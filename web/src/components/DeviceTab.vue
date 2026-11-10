@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { state, run, refreshInfo, hsmEvent, log, errorText, quitApp, isDashboard } from '../lib/store.js'
+import DeviceSettings from './DeviceSettings.vue'
 
 const error = ref(null)
 const genuine = ref(null) // null | true | false
@@ -174,5 +175,6 @@ const quit = () => guard(quitApp)
         </template>
       </div>
     </div>
+    <DeviceSettings v-if="!info?.locked" />
   </div>
 </template>

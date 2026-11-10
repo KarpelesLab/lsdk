@@ -72,6 +72,46 @@ enum Cmd {
     Rename { name: String },
     /// Battery status.
     Battery,
+    /// Restart the dashboard.
+    Reset,
+    /// Bluetooth MAC address.
+    Mac,
+    /// Set the battery charge limit (percent).
+    ChargeLimit { percent: u8 },
+    /// Language packs.
+    Lang {
+        #[command(subcommand)]
+        cmd: LangCmd,
+    },
+    /// Endorsement (user attestation keys).
+    Endorse {
+        #[command(subcommand)]
+        cmd: EndorseCmd,
+    },
+    /// Onboard from the host (test devices: the seed travels over USB).
+    Onboard {
+        /// main, alternate or temporary
+        #[arg(long, default_value = "main")]
+        identity: String,
+        #[arg(long, default_value = "")]
+        pin: String,
+        /// Recovery phrase (empty to reuse the main one for alternate identities).
+        #[arg(long, default_value = "")]
+        words: String,
+        #[arg(long, default_value = "")]
+        passphrase: String,
+        /// Seed derivation prefix (empty = BIP-39 "mnemonic").
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Required: acknowledges the PIN and phrase are sent in clear over USB.
+        #[arg(long)]
+        i_understand_the_seed_travels_over_usb: bool,
+    },
+    /// Factory commands (devices not yet personalized only).
+    Factory {
+        #[command(subcommand)]
+        cmd: FactoryCmd,
+    },
     /// Custom certificate authority (needed to sideload apps).
     Ca {
         #[command(subcommand)]
@@ -118,6 +158,50 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum LangCmd {
+    /// Packs available for this firmware.
+    Available,
+    /// Installed packs.
+    List,
+    /// Install a pack (e.g. french); replaces the installed one.
+    Install { language: String },
+    /// Remove the installed packs (back to English).
+    Remove,
+}
+
+#[derive(Subcommand)]
+enum EndorseCmd {
+    /// Show the endorsement key of a slot (1 or 2).
+    Info { slot: u8 },
+    /// Create the slot key and certify it with your owner key.
+    Setup {
+        slot: u8,
+        /// Owner private key file (default: the lsdk CA key).
+        #[arg(long)]
+        owner_key: Option<std::path::PathBuf>,
+        /// Use this DER certificate (hex) instead of signing with the owner key.
+        #[arg(long)]
+        certificate: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FactoryCmd {
+    /// FACTORY_TEST with raw P1, P2 and data (hex).
+    Test {
+        p1: String,
+        #[arg(default_value = "0")]
+        p2: String,
+        #[arg(default_value = "")]
+        data: String,
+    },
+    /// GET_DEVICE_PUBLIC_KEY (personalization).
+    PublicKey,
+    /// GET_CXPORT.
+    Cxport,
+}
+
+#[derive(Subcommand)]
 enum CaCmd {
     /// Generate the CA key (stored in the lsdk config directory).
     Keygen {
@@ -143,9 +227,22 @@ enum CaCmd {
         /// Install this public key (hex) instead of the key file's.
         #[arg(long)]
         public: Option<String>,
+        /// Use the Recover secure channel (for firmware without the regular command).
+        #[arg(long)]
+        recover: bool,
     },
     /// Remove the custom CA from the device (recovery mode, confirmed on device).
-    Remove,
+    Remove {
+        /// Use the Recover secure channel (needs the installed CA name and key).
+        #[arg(long)]
+        recover: bool,
+        #[arg(long, default_value = "lsdk dev")]
+        name: String,
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+        #[arg(long)]
+        public: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -187,6 +284,11 @@ enum AppCmd {
         #[arg(long)]
         key: Option<std::path::PathBuf>,
     },
+    /// Delete every app (confirmed on device).
+    DeleteAll {
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+    },
     /// List apps through the secure channel.
     List {
         #[arg(long)]
@@ -220,6 +322,11 @@ enum FirmwareCmd {
     Update,
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair,
+    /// Hash of the installed firmware (secure channel).
+    Hash {
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -511,6 +618,144 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Quit => open(&cli)?.quit_app().await?,
         Cmd::Name => println!("{}", open(&cli)?.get_device_name().await?),
         Cmd::Rename { name } => open(&cli)?.set_device_name(name).await?,
+        Cmd::Reset => {
+            open(&cli)?.reset().await?;
+            println!("dashboard reset");
+        }
+        Cmd::Mac => println!("{}", open(&cli)?.get_device_mac().await?),
+        Cmd::ChargeLimit { percent } => {
+            open(&cli)?.set_battery_charge_limit(*percent).await?;
+            println!("charge limit set to {percent}%");
+        }
+        Cmd::Lang { cmd } => {
+            let d = open(&cli)?;
+            match cmd {
+                LangCmd::Available => {
+                    let os = d.get_version().await?;
+                    for p in manager.language_packs(&os).await? {
+                        println!(
+                            "{:<12} {:<8} {:>6} bytes",
+                            p.language,
+                            p.version,
+                            p.bytes.unwrap_or(0)
+                        );
+                    }
+                }
+                LangCmd::List => {
+                    for p in d.list_language_packs().await? {
+                        println!(
+                            "{} ({}) {} bytes",
+                            lsdk::os::language_name(p.id),
+                            p.id,
+                            p.size
+                        );
+                    }
+                }
+                LangCmd::Install { language } => {
+                    let os = d.get_version().await?;
+                    let pack = manager
+                        .language_packs(&os)
+                        .await?
+                        .into_iter()
+                        .find(|p| p.language.eq_ignore_ascii_case(language))
+                        .ok_or_else(|| {
+                            Error::NotFound(format!("no {language} pack for this firmware"))
+                        })?;
+                    eprintln!("> confirm on the device if asked");
+                    manager
+                        .install_language_pack(&d, &pack, &mut |i, n| {
+                            eprint!("\r> {i}/{n}");
+                            if i == n {
+                                eprintln!();
+                            }
+                        })
+                        .await?;
+                    println!("{} {} installed", pack.language, pack.version);
+                }
+                LangCmd::Remove => {
+                    manager.remove_language_packs(&d).await?;
+                    println!("language packs removed");
+                }
+            }
+        }
+        Cmd::Endorse { cmd } => {
+            use lsdk::os::EndorsementSlot;
+            let slot = |n: u8| match n {
+                1 => Ok(EndorsementSlot::Slot1),
+                2 => Ok(EndorsementSlot::Slot2),
+                _ => Err(Error::InvalidInput("slot must be 1 or 2".into())),
+            };
+            let d = open(&cli)?;
+            match cmd {
+                EndorseCmd::Info { slot: n } => print(&d.endorsement_info(slot(*n)?).await?),
+                EndorseCmd::Setup {
+                    slot: n,
+                    owner_key,
+                    certificate,
+                } => {
+                    let (public, _device_sig) = d.endorse_start(slot(*n)?).await?;
+                    eprintln!("endorsement key: {}", hex::encode(&public));
+                    let cert = match certificate {
+                        Some(c) => hex::decode(c.trim_start_matches("0x"))
+                            .map_err(|e| Error::InvalidInput(e.to_string()))?,
+                        None => {
+                            let owner =
+                                read_key(&owner_key.clone().unwrap_or_else(default_ca_path))?;
+                            lsdk::scp::endorsement_certificate(&owner, &public)?
+                        }
+                    };
+                    d.endorse_commit(&cert).await?;
+                    println!("slot {n} endorsed, certificate {}", hex::encode(&cert));
+                }
+            }
+        }
+        Cmd::Onboard {
+            identity,
+            pin,
+            words,
+            passphrase,
+            prefix,
+            i_understand_the_seed_travels_over_usb,
+        } => {
+            use lsdk::os::OnboardIdentity;
+            if !i_understand_the_seed_travels_over_usb {
+                return Err(Error::InvalidInput(
+                    "host onboarding sends the PIN and recovery phrase in clear over USB; \
+                     pass --i-understand-the-seed-travels-over-usb (test devices only)"
+                        .into(),
+                ));
+            }
+            let id = match identity.as_str() {
+                "main" => OnboardIdentity::Main,
+                "alternate" => OnboardIdentity::Alternate,
+                "temporary" => OnboardIdentity::Temporary,
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "identity: main, alternate or temporary".into(),
+                    ));
+                }
+            };
+            open(&cli)?
+                .onboard(id, pin, prefix, passphrase, words)
+                .await?;
+            println!("onboarded ({identity})");
+        }
+        Cmd::Factory { cmd } => {
+            let d = open(&cli)?;
+            let num = |s: &str| {
+                u8::from_str_radix(s.trim_start_matches("0x"), 16)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))
+            };
+            let out = match cmd {
+                FactoryCmd::Test { p1, p2, data } => {
+                    let data = hex::decode(data).map_err(|e| Error::InvalidInput(e.to_string()))?;
+                    d.factory_test(num(p1)?, num(p2)?, &data).await?
+                }
+                FactoryCmd::PublicKey => d.factory_get_device_public_key().await?,
+                FactoryCmd::Cxport => d.factory_get_cxport().await?,
+            };
+            println!("{}", hex::encode(out));
+        }
         Cmd::Ca { cmd } => match cmd {
             CaCmd::Keygen { force, key } => {
                 let path = key.clone().unwrap_or_else(default_ca_path);
@@ -529,7 +774,12 @@ async fn run(cli: Cli) -> Result<()> {
                 let k = read_key(&key.clone().unwrap_or_else(default_ca_path))?;
                 println!("{}", hex::encode(k.public_key()));
             }
-            CaCmd::Install { name, key, public } => {
+            CaCmd::Install {
+                name,
+                key,
+                public,
+                recover,
+            } => {
                 let public = match public {
                     Some(p) => hex::decode(p.trim_start_matches("0x"))
                         .map_err(|e| Error::InvalidInput(e.to_string()))?,
@@ -540,17 +790,54 @@ async fn run(cli: Cli) -> Result<()> {
                 let d = open(&cli)?;
                 // Any root key works here: the device asks to allow it.
                 let root = lsdk::scp::RootKey::generate()?;
-                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                let mode = if *recover {
+                    lsdk::scp::ScpMode::Recover
+                } else {
+                    lsdk::scp::ScpMode::Default
+                };
+                let mut chan =
+                    lsdk::scp::SecureChannel::open_mode(&d, &root, mode, &mut scp_progress).await?;
                 eprintln!("> confirm installing the CA \"{name}\" on the device");
-                chan.setup_custom_ca(name, &public).await.map_err(ca_hint)?;
+                if *recover {
+                    chan.recover_set_ca(name, &public).await.map_err(ca_hint)?;
+                } else {
+                    chan.setup_custom_ca(name, &public).await.map_err(ca_hint)?;
+                }
                 println!("custom CA \"{name}\" installed: {}", hex::encode(&public));
             }
-            CaCmd::Remove => {
+            CaCmd::Remove {
+                recover,
+                name,
+                key,
+                public,
+            } => {
                 let d = open(&cli)?;
                 let root = lsdk::scp::RootKey::generate()?;
-                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
-                eprintln!("> confirm removing the custom CA on the device");
-                chan.reset_custom_ca().await.map_err(ca_hint)?;
+                if *recover {
+                    let public = match public {
+                        Some(p) => hex::decode(p.trim_start_matches("0x"))
+                            .map_err(|e| Error::InvalidInput(e.to_string()))?,
+                        None => read_key(&key.clone().unwrap_or_else(default_ca_path))?
+                            .public_key()
+                            .to_vec(),
+                    };
+                    let mut chan = lsdk::scp::SecureChannel::open_mode(
+                        &d,
+                        &root,
+                        lsdk::scp::ScpMode::Recover,
+                        &mut scp_progress,
+                    )
+                    .await?;
+                    eprintln!("> confirm removing the custom CA on the device");
+                    chan.recover_delete_ca(name, &public)
+                        .await
+                        .map_err(ca_hint)?;
+                } else {
+                    let mut chan =
+                        lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                    eprintln!("> confirm removing the custom CA on the device");
+                    chan.reset_custom_ca().await.map_err(ca_hint)?;
+                }
                 println!("custom CA removed");
             }
         },
@@ -644,6 +931,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 println!("deleted {name}");
             }
+            AppCmd::DeleteAll { key } => {
+                let d = open(&cli)?;
+                let root = root_key(key.as_ref())?;
+                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                eprintln!("> confirm deleting all apps on the device");
+                chan.delete_all_apps().await?;
+                println!("all apps deleted");
+            }
             AppCmd::List { key } => {
                 let d = open(&cli)?;
                 let root = root_key(key.as_ref())?;
@@ -687,6 +982,14 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Battery => print(&open(&cli)?.get_battery_status().await?),
+        Cmd::Firmware {
+            cmd: FirmwareCmd::Hash { key },
+        } => {
+            let d = open(&cli)?;
+            let root = root_key(key.as_ref())?;
+            let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+            println!("{}", hex::encode(chan.hash_firmware().await?));
+        }
         Cmd::Firmware { cmd } => {
             let d = open(&cli)?;
             let os = d.get_version().await?;
@@ -697,7 +1000,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
             let update = manager.check_firmware_update(&os).await?;
             match (cmd, update) {
-                (FirmwareCmd::Repair, _) => unreachable!(),
+                (FirmwareCmd::Repair | FirmwareCmd::Hash { .. }, _) => unreachable!(),
                 (_, None) => println!("firmware {} is up to date", os.se_version),
                 (FirmwareCmd::Check, Some(u)) => print(&u),
                 (FirmwareCmd::Update, Some(u)) => {

@@ -177,6 +177,195 @@ impl ScreenSaver {
     }
 }
 
+/// `RESET` (`E0 02`): puts the dashboard / secure element in reset state.
+pub const RESET: Apdu = Apdu::new(0xe0, 0x02, 0x00, 0x00);
+/// `GET_DEVICE_MAC` (`E0 D5`): Bluetooth MAC address (BLE models).
+pub const GET_DEVICE_MAC: Apdu = Apdu::new(0xe0, 0xd5, 0x00, 0x00);
+/// `GET_DEVICE_PUBLIC_KEY` (`E0 40`): factory personalization only.
+pub const GET_DEVICE_PUBLIC_KEY: Apdu = Apdu::new(0xe0, 0x40, 0x00, 0x00);
+/// `GET_CXPORT` (`E0 C5`): factory.
+pub const GET_CXPORT: Apdu = Apdu::new(0xe0, 0xc5, 0x00, 0x00);
+
+/// Build `SET_MAX_BATT_PERC` (`E0 19`): battery charge limit (0-100).
+pub fn set_battery_charge_limit(percent: u8) -> Result<Apdu> {
+    if percent > 100 {
+        return Err(Error::InvalidInput("percentage must be 0..=100".into()));
+    }
+    Ok(Apdu::with_data(0xe0, 0x19, 0x00, 0x00, vec![percent]))
+}
+
+/// Build `LIST_LANGUAGE_PACKS` (`E0 34`), first page or continuation.
+pub fn list_language_packs(first: bool) -> Apdu {
+    Apdu::new(0xe0, 0x34, if first { 0x00 } else { 0x01 }, 0x00)
+}
+
+/// Build `DEL_LANGUAGE_PACK` (`E0 33`).
+pub fn delete_language_pack(language: u8) -> Apdu {
+    Apdu::new(0xe0, 0x33, language, 0x00)
+}
+
+/// Build `CREATE_LANGUAGE_PACK` (`E0 30`): reserve `size` bytes for a pack.
+pub fn create_language_pack(language: u8, size: u32) -> Apdu {
+    Apdu::with_data(0xe0, 0x30, language, 0x00, size.to_be_bytes().to_vec())
+}
+
+/// Build `LOAD_LANGUAGE_PACK` (`E0 31`): chunk at `offset`.
+pub fn load_language_pack(language: u8, offset: u32, chunk: &[u8]) -> Apdu {
+    let mut d = offset.to_be_bytes().to_vec();
+    d.extend_from_slice(chunk);
+    Apdu::with_data(0xe0, 0x31, language, 0x00, d)
+}
+
+/// Build `COMMIT_LANGUAGE_PACK` (`E0 32`) with the vendor signature (mandatory).
+pub fn commit_language_pack(language: u8, signature: &[u8]) -> Apdu {
+    let mut d = vec![signature.len() as u8];
+    d.extend_from_slice(signature);
+    Apdu::with_data(0xe0, 0x32, language, 0x00, d)
+}
+
+/// An installed language pack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct LanguagePack {
+    /// Language id (0 English, 1 French, 2 Spanish, 3 Portuguese, 4 German, 5 Russian, 6 Turkish...).
+    pub id: u32,
+    pub size: u32,
+}
+
+/// Human name of a language id.
+pub fn language_name(id: u32) -> &'static str {
+    match id {
+        0 => "English",
+        1 => "French",
+        2 => "Spanish",
+        3 => "Portuguese",
+        4 => "German",
+        5 => "Russian",
+        6 => "Turkish",
+        _ => "unknown",
+    }
+}
+
+/// Parse one `LIST_LANGUAGE_PACKS` response (`None` when the list is over).
+pub fn parse_language_pack(data: &[u8]) -> Result<Option<LanguagePack>> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+    let int_of = |b: &[u8]| b.iter().fold(0u32, |acc, x| (acc << 8) | *x as u32);
+    let mut r = Reader::new(data);
+    let _version = r.u8()?;
+    let _len = r.u8()?;
+    let id = int_of(r.lv()?);
+    let size = int_of(r.lv()?);
+    Ok(Some(LanguagePack { id, size }))
+}
+
+/// Endorsement slot (user attestation keys).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(u8)]
+pub enum EndorsementSlot {
+    Slot1 = 1,
+    Slot2 = 2,
+}
+
+/// Build `ENDORSE_SET_START` (`E0 C0`): generate the slot key.
+pub fn endorse_set_start(slot: EndorsementSlot) -> Apdu {
+    Apdu::new(0xe0, 0xc0, slot as u8, 0x00)
+}
+
+/// Build `ENDORSE_SET_COMMIT` (`E0 C2`): store the owner certificate.
+pub fn endorse_set_commit(certificate: &[u8]) -> Apdu {
+    Apdu::with_data(0xe0, 0xc2, 0x00, 0x00, certificate.to_vec())
+}
+
+/// Build `ENDORSEMENT_INFO_RETRIEVAL` (`E0 C6`).
+pub fn endorsement_info(slot: EndorsementSlot) -> Apdu {
+    Apdu::new(0xe0, 0xc6, slot as u8, 0x00)
+}
+
+/// Endorsement key of a slot and its certificate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+pub struct EndorsementInfo {
+    pub role: u8,
+    /// Endorsement public key (hex).
+    pub public_key: String,
+    /// Owner certificate (hex DER signature over `sha256(0xFE || public_key)`).
+    pub certificate: String,
+}
+
+impl EndorsementInfo {
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(data);
+        let role = r.u8()?;
+        let public_key = hex::encode(r.lv()?);
+        let certificate = hex::encode(r.lv()?);
+        Ok(Self {
+            role,
+            public_key,
+            certificate,
+        })
+    }
+}
+
+/// Onboarding identity (`E0 D0` P1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
+#[repr(u8)]
+pub enum OnboardIdentity {
+    /// Main identity (PIN + recovery phrase), only on a non-onboarded device.
+    Main = 0,
+    /// Alternate identity (second PIN, e.g. passphrase wallet).
+    Alternate = 1,
+    /// Temporary identity (no PIN, until reboot).
+    Temporary = 2,
+}
+
+/// Build `ONBOARD` (`E0 D0`). **The PIN and recovery phrase travel in clear
+/// over USB**: only for test devices.
+pub fn onboard(
+    identity: OnboardIdentity,
+    pin: &str,
+    prefix: &str,
+    passphrase: &str,
+    words: &str,
+) -> Result<Apdu> {
+    let mut d = Vec::new();
+    for f in [pin, prefix, passphrase, words] {
+        if f.len() > 255 {
+            return Err(Error::InvalidInput("onboard field too long".into()));
+        }
+        d.push(f.len() as u8);
+        d.extend_from_slice(f.as_bytes());
+    }
+    if d.len() > 255 {
+        return Err(Error::InvalidInput("onboard data too long".into()));
+    }
+    Ok(Apdu::with_data(0xe0, 0xd0, identity as u8, 0x00, d))
+}
+
+/// Build `FACTORY_TEST` (`E0 44`) — devices without a serial number only.
+pub fn factory_test(p1: u8, p2: u8, data: &[u8]) -> Apdu {
+    Apdu::with_data(0xe0, 0x44, p1, p2, data.to_vec())
+}
+
+/// `FACTORY_TEST` P1 values.
+pub mod factory {
+    pub const START_STOP: u8 = 0x00;
+    pub const SCREEN: u8 = 0x10;
+    pub const BUTTON: u8 = 0x20;
+    pub const BATTERY: u8 = 0x30;
+    pub const GET_SE_SERIAL: u8 = 0xd0;
+    pub const RESET: u8 = 0xe0;
+    pub const SERIAL_NUMBER: u8 = 0xf0;
+    pub const BACKUP_SERIAL_NUMBER: u8 = 0xf1;
+    pub const MCU_SERIAL_NUMBER: u8 = 0xf2;
+}
+
 /// Names reported by `GET_APP_AND_VERSION` while on the dashboard.
 pub fn is_dashboard_name(name: &str) -> bool {
     name == "BOLOS" || name == "OLOS\0"
@@ -583,6 +772,23 @@ mod tests {
         assert_eq!(s.animation, Some(ScreenSaverAnimation::CircleRightToLeft));
         assert_eq!(s.speed, Some(ScreenSaverSpeed::Slow));
         assert_eq!(ScreenSaver::parse(b"").unwrap(), None);
+    }
+
+    #[test]
+    fn misc_commands() {
+        assert!(set_battery_charge_limit(101).is_err());
+        assert_eq!(set_battery_charge_limit(80).unwrap().data, vec![80]);
+        let o = onboard(OnboardIdentity::Main, "1234", "", "", "abandon about").unwrap();
+        assert_eq!(o.p1, 0);
+        assert_eq!(o.data, b"\x041234\x00\x00\x0dabandon about".to_vec());
+        let lp = parse_language_pack(&[1, 9, 1, 2, 4, 0, 1, 0, 0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(lp, LanguagePack { id: 2, size: 65536 });
+        assert_eq!(parse_language_pack(&[]).unwrap(), None);
+        let e = EndorsementInfo::parse(&[0xff, 1, 0xaa, 2, 0x30, 0x00]).unwrap();
+        assert_eq!(e.public_key, "aa");
+        assert_eq!(e.certificate, "3000");
     }
 
     #[test]

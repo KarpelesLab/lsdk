@@ -25,6 +25,10 @@ name = "lsdk"
 path = "src/bin/lsdk.rs"
 required-features = ["cli"]
 
+[[example]]
+name = "elfinfo"
+required-features = ["loader"]
+
 [profile.release]
 opt-level = "s"
 lto = true

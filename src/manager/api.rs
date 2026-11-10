@@ -133,6 +133,41 @@ pub struct Application {
     pub parent_name: Option<String>,
 }
 
+/// A language pack from the catalog.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LanguagePackage {
+    /// Language name (`french`, `spanish`...).
+    pub language: String,
+    #[serde(rename = "languagePackageVersionId")]
+    pub language_package_version_id: u64,
+    pub version: String,
+    #[serde(default)]
+    pub language_package_id: Option<u64>,
+    /// URL of the install APDU script (one hex APDU per line).
+    pub apdu_install_url: String,
+    /// URL of the uninstall APDU script.
+    #[serde(default)]
+    pub apdu_uninstall_url: Option<String>,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+}
+
+impl LanguagePackage {
+    /// Device language id of this pack.
+    pub fn language_id(&self) -> Option<u8> {
+        Some(match self.language.as_str() {
+            "english" => 0,
+            "french" => 1,
+            "spanish" => 2,
+            "portuguese" => 3,
+            "german" => 4,
+            "russian" => 5,
+            "turkish" => 6,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct LatestFirmwareResponse {
     result: String,
@@ -297,6 +332,34 @@ impl ManagerApi {
             ],
         )
         .await
+    }
+
+    /// Language packs available for a device version and final firmware.
+    pub async fn get_language_packages(
+        &self,
+        device_version: u32,
+        final_firmware_id: u32,
+    ) -> Result<Vec<LanguagePackage>> {
+        self.get(
+            "/language-packages",
+            &[
+                ("device_version", device_version.to_string()),
+                (
+                    "current_se_firmware_final_version",
+                    final_firmware_id.to_string(),
+                ),
+            ],
+        )
+        .await
+    }
+
+    /// Download a text resource (APDU scripts).
+    pub async fn fetch_text(&self, url: &str) -> Result<String> {
+        let resp = self.client.get(url).send().await.map_err(http_err)?;
+        if !resp.status().is_success() {
+            return Err(Error::Http(format!("{url}: HTTP {}", resp.status())));
+        }
+        resp.text().await.map_err(http_err)
     }
 
     /// Resolve installed app hashes to catalog entries.
