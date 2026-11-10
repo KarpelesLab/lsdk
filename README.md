@@ -3,7 +3,7 @@
 [![CI](https://github.com/KarpelesLab/lsdk/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/lsdk/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/lsdk.svg)](https://crates.io/crates/lsdk)
 [![docs.rs](https://img.shields.io/docsrs/lsdk)](https://docs.rs/lsdk)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Web console](https://img.shields.io/badge/web%20console-GitHub%20Pages-0f766e.svg)](https://karpeleslab.github.io/lsdk/)
 
 **Web console: <https://karpeleslab.github.io/lsdk/>** (Chrome / Edge, WebHID)
@@ -137,5 +137,6 @@ Rust 1.95+ (edition 2024). Native HID on Linux needs `libudev`.
 
 ## License
 
-MIT or Apache-2.0, at your option. The Bitcoin client-command interpreter is
-ported from the vendor's Apache-2.0 reference client.
+MIT, see [LICENSE](LICENSE). The Bitcoin client-command interpreter
+(`src/apps/btc/merkle.rs`) is a port of the vendor's Apache-2.0 reference
+client.
