@@ -3,3 +3,5 @@ node_modules/
 /web/dist
 /web/src/pkg
 *.log
+# Cargo.lock intentionally not committed: lsdk is primarily a library crate.
+/Cargo.lock

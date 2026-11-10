@@ -1,5 +1,13 @@
 # lsdk
 
+[![CI](https://github.com/KarpelesLab/lsdk/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/lsdk/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/lsdk.svg)](https://crates.io/crates/lsdk)
+[![docs.rs](https://img.shields.io/docsrs/lsdk)](https://docs.rs/lsdk)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Web console](https://img.shields.io/badge/web%20console-GitHub%20Pages-0f766e.svg)](https://karpeleslab.github.io/lsdk/)
+
+**Web console: <https://karpeleslab.github.io/lsdk/>** (Chrome / Edge, WebHID)
+
 A Rust SDK and browser console for hardware wallets running the BOLOS
 operating system (Nano S, Nano S Plus, Nano X, Stax, Flex, Nano Gen5), over
 USB HID natively or through WebHID in the browser.
@@ -15,6 +23,8 @@ USB HID natively or through WebHID in the browser.
 This project is not affiliated with or endorsed by the device manufacturer.
 
 ## Web console
+
+Live at **<https://karpeleslab.github.io/lsdk/>**.
 
 The [`web/`](web) directory is a Vue app built on the wasm build of the crate.
 It is deployed to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml).

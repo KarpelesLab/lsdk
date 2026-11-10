@@ -16,7 +16,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: System dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
       - uses: dtolnay/rust-toolchain@1.95
@@ -45,7 +45,7 @@ jobs:
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.95
         with:
           targets: wasm32-unknown-unknown
