@@ -220,7 +220,7 @@ impl Transport for WebHidTransport {
             return Err(Error::Disconnected);
         }
         // Drop anything stale.
-        while let Ok(Some(p)) = rx.try_next() {
+        while let Ok(p) = rx.try_recv() {
             p?;
         }
         for packet in framing::encode(self.channel, apdu, PACKET_SIZE) {

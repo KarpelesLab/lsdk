@@ -135,26 +135,24 @@ impl<T: Transport> Device<T> {
         let mut st = BatteryStatus::default();
         let p = self.get_battery_raw(BatteryStatusKind::Percentage).await?;
         st.percentage = p.first().copied().filter(|v| *v <= 100);
-        if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Voltage).await {
-            if v.len() >= 2 {
+        if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Voltage).await
+            && v.len() >= 2 {
                 st.voltage_mv = Some(u16::from_be_bytes([v[0], v[1]]));
             }
-        }
         if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Temperature).await {
             st.temperature_c = v.first().map(|b| *b as i8);
         }
         if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Current).await {
             st.current_ma = v.first().map(|b| *b as i8);
         }
-        if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Flags).await {
-            if v.len() >= 4 {
+        if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Flags).await
+            && v.len() >= 4 {
                 let f = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
                 st.raw_flags = Some(f);
                 st.charging = f & 0x1 != 0;
                 st.usb_connected = f & 0x2 != 0;
                 st.ble_connected = f & 0x4 != 0;
             }
-        }
         Ok(st)
     }
 }

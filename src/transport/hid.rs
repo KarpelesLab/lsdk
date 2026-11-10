@@ -98,11 +98,10 @@ impl HidTransport {
     pub fn wait_and_open(timeout: Duration) -> Result<Self> {
         let start = Instant::now();
         loop {
-            if let Some(first) = Self::list()?.first() {
-                if let Ok(t) = Self::open(first) {
+            if let Some(first) = Self::list()?.first()
+                && let Ok(t) = Self::open(first) {
                     return Ok(t);
                 }
-            }
             if start.elapsed() > timeout {
                 return Err(Error::NoDevice);
             }
@@ -135,11 +134,10 @@ impl HidTransport {
         loop {
             let n = dev.read_timeout(&mut buf, 500).map_err(map_hid_err)?;
             if n == 0 {
-                if let Some(t) = self.timeout {
-                    if start.elapsed() > t {
+                if let Some(t) = self.timeout
+                    && start.elapsed() > t {
                         return Err(Error::Timeout);
                     }
-                }
                 continue;
             }
             if let Some(resp) = decoder.push(&buf[..n])? {

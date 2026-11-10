@@ -41,6 +41,14 @@ pub mod os;
 pub mod path;
 pub mod transport;
 
+#[cfg(any(feature = "manager-api", feature = "hsm"))]
+pub mod manager;
+
+#[cfg(feature = "hsm")]
+pub mod hsm;
+
+#[cfg(any(feature = "eth", feature = "btc", feature = "sol"))]
+pub mod apps;
 
 pub use apdu::{Apdu, Response, StatusWord};
 pub use device::Device;
