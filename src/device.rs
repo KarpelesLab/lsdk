@@ -111,7 +111,8 @@ impl<T: Transport> Device<T> {
         Ok(apps)
     }
 
-    /// Device name (as shown over Bluetooth).
+    /// Device name (as shown over Bluetooth). The device asks the user to
+    /// allow it, so avoid calling this implicitly.
     pub async fn get_device_name(&self) -> Result<String> {
         let data = self.send(&os::GET_DEVICE_NAME).await?;
         Ok(String::from_utf8_lossy(&data).into_owned())

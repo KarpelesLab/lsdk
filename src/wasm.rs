@@ -141,7 +141,6 @@ struct InfoOut {
     product_id: u16,
     app: Option<crate::os::AppAndVersion>,
     version: Option<crate::os::OsVersion>,
-    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -313,13 +312,12 @@ impl HwDevice {
     pub async fn info(&self) -> JsResult<JsValue> {
         let app = self.device.get_app_and_version().await.ok();
         let on_dashboard = app.as_ref().map(|a| a.is_dashboard()).unwrap_or(true);
-        let (version, name) = if on_dashboard {
-            (
-                self.device.get_version().await.ok(),
-                self.device.get_device_name().await.ok(),
-            )
+        // No device name here: reading it asks the user for consent on the
+        // device. Use `getName()` explicitly.
+        let version = if on_dashboard {
+            self.device.get_version().await.ok()
         } else {
-            (None, None)
+            None
         };
         let t = self.device.transport();
         to_js(&InfoOut {
@@ -332,7 +330,6 @@ impl HwDevice {
             product_id: t.product_id(),
             app,
             version,
-            name,
         })
     }
 
@@ -363,6 +360,7 @@ impl HwDevice {
         )
     }
 
+    /// Device name. Asks the user for consent on the device.
     #[wasm_bindgen(js_name = getName)]
     pub async fn get_name(&self) -> JsResult<String> {
         self.device.get_device_name().await.map_err(js_err)

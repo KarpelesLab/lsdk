@@ -6,6 +6,7 @@ const error = ref(null)
 const genuine = ref(null) // null | true | false
 const battery = ref(null)
 const newName = ref('')
+const deviceName = ref(null)
 
 const info = computed(() => state.info)
 const v = computed(() => info.value?.version)
@@ -27,6 +28,13 @@ const checkGenuine = () => guard(async () => {
   log(genuine.value ? 'ok' : 'error', genuine.value ? 'device is genuine' : 'genuine check FAILED')
 })
 
+const readName = () => guard(async () => {
+  deviceName.value = await run('read name', (d) => {
+    state.prompt = 'Allow reading the device name on the device'
+    return d.getName()
+  })
+})
+
 const loadBattery = () => guard(async () => { battery.value = await run('battery', (d) => d.battery()) })
 
 const rename = () => guard(async () => {
@@ -36,8 +44,8 @@ const rename = () => guard(async () => {
     await d.setName(name)
   })
   log('ok', `renamed to ${name}`)
+  deviceName.value = name
   newName.value = ''
-  await refreshInfo()
 })
 
 const quit = () => guard(quitApp)
@@ -66,7 +74,10 @@ const quit = () => guard(quitApp)
           <button class="small" :disabled="!!state.busy" @click="refresh">Refresh</button>
         </div>
         <dl class="kv" v-if="v">
-          <dt>Name</dt><dd>{{ info.name || '—' }}</dd>
+          <dt>Name</dt><dd>
+            <span v-if="deviceName !== null">{{ deviceName || '—' }}</span>
+            <button v-else class="small" :disabled="!!state.busy" @click="readName">Read</button>
+          </dd>
           <dt>Firmware</dt><dd>{{ v.seVersion || v.rawVersion }} <span v-if="v.isOsu" class="badge warn">OS updater</span><span v-if="v.isBootloader" class="badge warn">bootloader</span></dd>
           <dt>MCU</dt><dd>{{ v.mcuSephVersion || '—' }}</dd>
           <dt>Bootloader</dt><dd>{{ v.mcuBootloaderVersion || '—' }}</dd>

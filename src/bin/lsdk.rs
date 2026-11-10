@@ -57,6 +57,8 @@ enum Cmd {
     Open { name: String },
     /// Quit the running app.
     Quit,
+    /// Device name (asks for consent on the device).
+    Name,
     /// Rename the device.
     Rename { name: String },
     /// Battery status.
@@ -270,7 +272,6 @@ struct Info {
     version: lsdk::os::OsVersion,
     model: Option<&'static str>,
     app: Option<lsdk::os::AppAndVersion>,
-    name: Option<String>,
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -286,12 +287,10 @@ async fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             let version = d.get_version().await?;
-            let name = d.get_device_name().await.ok();
             print(&Info {
                 model: version.model().map(|m| m.name()),
                 version,
                 app,
-                name,
             });
         }
         Cmd::Apps => print(&manager.installed_apps(&open(&cli)?).await?),
@@ -348,6 +347,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Open { name } => open(&cli)?.open_app(name).await?,
         Cmd::Quit => open(&cli)?.quit_app().await?,
+        Cmd::Name => println!("{}", open(&cli)?.get_device_name().await?),
         Cmd::Rename { name } => open(&cli)?.set_device_name(name).await?,
         Cmd::Battery => print(&open(&cli)?.get_battery_status().await?),
         Cmd::Firmware { cmd } => {
