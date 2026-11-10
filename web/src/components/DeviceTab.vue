@@ -10,7 +10,7 @@ const deviceName = ref(null)
 
 const info = computed(() => state.info)
 const v = computed(() => info.value?.version)
-const onDashboard = computed(() => !info.value?.app || isDashboard(info.value.app.name))
+const onDashboard = computed(() => !info.value?.locked && (!info.value?.app || isDashboard(info.value.app.name)))
 const hasBattery = computed(() => ['Nano X', 'Stax', 'Flex', 'Nano Gen5'].includes(info.value?.model))
 const hex = (n) => (n == null ? '—' : '0x' + n.toString(16).padStart(8, '0'))
 const words = computed(() => v.value?.flags?.seedWordCount)
@@ -72,7 +72,12 @@ const quit = () => guard(quitApp)
   <div class="grid">
     <p v-if="error" class="error">{{ error }}</p>
 
-    <div v-if="!onDashboard" class="panel">
+    <div v-if="info?.locked" class="panel">
+      <h2>Device locked</h2>
+      <p class="muted small-text" style="margin:0">Enter your PIN on the device; this page updates once it is unlocked.</p>
+    </div>
+
+    <div v-else-if="!onDashboard" class="panel">
       <div class="row">
         <div>
           <h2>{{ info.app.name }} {{ info.app.version }} is open</h2>

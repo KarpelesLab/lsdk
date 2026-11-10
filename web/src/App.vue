@@ -51,7 +51,8 @@ onMounted(() => boot().catch((e) => { error.value = errorText(e); log('error', e
     </div>
     <div class="spacer"></div>
     <template v-if="state.ready && state.supported">
-      <span v-if="state.connected" class="badge ok">● {{ state.info?.model || state.device?.productName }}</span>
+      <span v-if="state.connected && state.info?.locked" class="badge warn">🔒 {{ state.info?.model || state.device?.productName }} locked</span>
+      <span v-else-if="state.connected" class="badge ok">● {{ state.info?.model || state.device?.productName }}</span>
       <span v-else-if="state.reconnecting" class="badge warn">waiting for device…</span>
       <span v-else class="badge">not connected</span>
       <button v-if="!state.connected" class="primary" @click="doConnect">{{ state.reconnecting ? 'Select device' : 'Connect device' }}</button>

@@ -103,9 +103,23 @@ export async function disconnect() {
   state.info = null
 }
 
+let lockPoll = null
+
 export async function refreshInfo() {
   if (!state.device) return
+  const wasLocked = state.info?.locked
   state.info = await state.device.info()
+  if (state.info?.locked) {
+    if (!wasLocked) log('warn', 'device is locked: enter your PIN on the device')
+    // Poll (no prompt involved) until it is unlocked.
+    clearTimeout(lockPoll)
+    lockPoll = setTimeout(() => {
+      if (state.busy || !state.connected) return
+      refreshInfo().catch(() => {})
+    }, 2000)
+  } else if (wasLocked) {
+    log('info', 'device unlocked')
+  }
 }
 
 // Run one device operation at a time. Handles disconnections transparently
@@ -129,6 +143,8 @@ export async function run(label, fn, { retryOnDisconnect = true } = {}) {
     }
   } catch (e) {
     log('error', `${label}: ${errorText(e)}`)
+    // Locked meanwhile (screensaver): show it, and poll until unlocked.
+    if (e?.kind === 'Locked') setTimeout(() => refreshInfo().catch(() => {}), 0)
     throw e
   } finally {
     state.busy = null

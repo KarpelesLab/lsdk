@@ -44,11 +44,12 @@ async function refresh() {
 
 <template>
   <div class="gate row">
-    <span class="badge" :class="ok ? 'ok' : 'warn'">{{ ok ? `${app} app open` : `running: ${running || 'unknown'}` }}</span>
+    <span v-if="state.info?.locked" class="badge warn">device locked: enter your PIN</span>
+    <span v-else class="badge" :class="ok ? 'ok' : 'warn'">{{ ok ? `${app} app open` : `running: ${running || 'unknown'}` }}</span>
     <span v-if="ok" class="muted small-text">v{{ state.info.app.version }}</span>
     <div class="spacer"></div>
     <button class="small" :disabled="!!state.busy" @click="refresh">Refresh</button>
-    <button v-if="!ok" class="small primary" :disabled="!!state.busy" @click="open">Open {{ app }}</button>
+    <button v-if="!ok" class="small primary" :disabled="!!state.busy || state.info?.locked" @click="open">Open {{ app }}</button>
     <div v-if="missing" class="missing row">
       <span>The <b>{{ app }}</b> app is not installed on your device. Install it now?</span>
       <div class="spacer"></div>

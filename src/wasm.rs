@@ -142,6 +142,8 @@ struct InfoOut {
     product_id: u16,
     app: Option<crate::os::AppAndVersion>,
     version: Option<crate::os::OsVersion>,
+    /// The device is locked (PIN / screensaver): unlock it to continue.
+    locked: bool,
 }
 
 #[derive(Deserialize)]
@@ -311,8 +313,12 @@ impl HwDevice {
 
     /// App + firmware information.
     pub async fn info(&self) -> JsResult<JsValue> {
-        let app = self.device.get_app_and_version().await.ok();
-        let on_dashboard = app.as_ref().map(|a| a.is_dashboard()).unwrap_or(true);
+        let (app, locked) = match self.device.get_app_and_version().await {
+            Ok(a) => (Some(a), false),
+            Err(Error::Locked) => (None, true),
+            Err(_) => (None, false),
+        };
+        let on_dashboard = !locked && app.as_ref().map(|a| a.is_dashboard()).unwrap_or(true);
         // No device name here: reading it asks the user for consent on the
         // device. Use `getName()` explicitly.
         let version = if on_dashboard {
@@ -331,6 +337,7 @@ impl HwDevice {
             product_id: t.product_id(),
             app,
             version,
+            locked,
         })
     }
 
