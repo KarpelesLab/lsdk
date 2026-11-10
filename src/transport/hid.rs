@@ -89,9 +89,19 @@ impl HidTransport {
             .map_err(|_| Error::Transport("hidapi poisoned".into()))?;
         let path =
             CString::new(info.path.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let device = api
-            .open_path(&path)
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let device = api.open_path(&path).map_err(|e| {
+            let m = e.to_string();
+            if cfg!(target_os = "linux")
+                && (m.contains("ermission") || m.contains("Failed to open"))
+            {
+                Error::Transport(format!(
+                    "{m}: no access to {}; install udev rules for USB vendor 2c97 (see the README)",
+                    info.path
+                ))
+            } else {
+                Error::Transport(m)
+            }
+        })?;
         Ok(Self {
             device: Mutex::new(device),
             info: info.clone(),

@@ -128,8 +128,20 @@ lsdk btc address --kind taproot --display
 lsdk sol transfer --to ... --amount 0.1 --blockhash ...
 ```
 
-On Linux, access to the device needs udev rules granting access to USB
-vendor `2c97`.
+### Linux: udev rules
+
+On Linux the device node is root-only by default; both the CLI and the
+browser (WebHID) need a udev rule:
+
+```sh
+sudo tee /etc/udev/rules.d/20-hw1.rules <<'RULES'
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
+KERNEL=="hidraw*", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
+RULES
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+Then replug the device. Without (e)logind seat management, use `MODE="0666"`.
 
 ## Requirements
 
