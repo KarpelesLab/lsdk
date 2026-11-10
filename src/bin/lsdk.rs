@@ -22,6 +22,11 @@ struct Cli {
     /// Device path (from `lsdk list`); defaults to the first device.
     #[arg(long, global = true)]
     device: Option<String>,
+    /// Linux: talk to the device over raw USB (usbfs) instead of hidraw. Used
+    /// automatically when hidraw access is denied.
+    #[cfg(target_os = "linux")]
+    #[arg(long, global = true)]
+    usbfs: bool,
     /// Manager API base URL.
     #[arg(long, global = true, default_value = lsdk::manager::api::DEFAULT_BASE_URL)]
     api: String,
@@ -30,6 +35,16 @@ struct Cli {
     hsm: String,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+impl Cli {
+    /// The usbfs note is only worth printing when the fallback kicked in.
+    fn usbfs_quiet(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return self.usbfs;
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
 }
 
 #[derive(Subcommand)]
@@ -551,16 +566,23 @@ fn progress(ev: HsmEvent) {
 }
 
 fn open(cli: &Cli) -> Result<Device<HidTransport>> {
-    let t = match &cli.device {
-        Some(path) => {
-            let info = HidTransport::list()?
-                .into_iter()
-                .find(|d| &d.path == path)
-                .ok_or(Error::NoDevice)?;
-            HidTransport::open(&info)?
-        }
-        None => HidTransport::open_first()?,
+    let list = HidTransport::list()?;
+    let info = match &cli.device {
+        Some(path) => list.into_iter().find(|d| &d.path == path),
+        None => list.into_iter().next(),
+    }
+    .ok_or(Error::NoDevice)?;
+    #[cfg(target_os = "linux")]
+    let t = if cli.usbfs {
+        HidTransport::open_usbfs(&info)?
+    } else {
+        HidTransport::open(&info)?
     };
+    #[cfg(not(target_os = "linux"))]
+    let t = HidTransport::open(&info)?;
+    if t.backend() == "usbfs" && !cli.usbfs_quiet() {
+        eprintln!("note: {} is not accessible, using raw USB", info.path);
+    }
     Ok(Device::new(t))
 }
 

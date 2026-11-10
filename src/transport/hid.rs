@@ -1,5 +1,9 @@
 //! Native USB HID transport based on `hidapi`.
 //!
+//! On Linux, when the hidraw node can't be opened (no udev rules), the
+//! transport falls back to raw USB through usbfs (`rawusb`), which works when
+//! `/dev/bus/usb` is accessible. [`HidTransport::backend`] tells which is used.
+//!
 //! The I/O is blocking: [`Transport::exchange`] performs the HID reads and
 //! writes on the calling thread. That's fine for CLIs and current-thread
 //! runtimes; in a multi-threaded async server, wrap calls in `spawn_blocking`.
@@ -40,9 +44,40 @@ pub struct HidDeviceInfo {
     pub bootloader: bool,
 }
 
+enum Backend {
+    Hid(HidDevice),
+    #[cfg(target_os = "linux")]
+    Usb(super::usbfs::UsbHid),
+}
+
+impl Backend {
+    /// Send one report (without report id).
+    fn write(&self, packet: &[u8]) -> Result<()> {
+        match self {
+            Backend::Hid(d) => {
+                let mut report = Vec::with_capacity(packet.len() + 1);
+                report.push(0x00); // report id
+                report.extend_from_slice(packet);
+                d.write(&report).map(|_| ()).map_err(map_hid_err)
+            }
+            #[cfg(target_os = "linux")]
+            Backend::Usb(d) => d.write(packet),
+        }
+    }
+
+    /// Read one report, `Ok(0)` on timeout.
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize> {
+        match self {
+            Backend::Hid(d) => d.read_timeout(buf, timeout_ms).map_err(map_hid_err),
+            #[cfg(target_os = "linux")]
+            Backend::Usb(d) => d.read_timeout(buf, timeout_ms as u64),
+        }
+    }
+}
+
 /// USB HID transport.
 pub struct HidTransport {
-    device: Mutex<HidDevice>,
+    device: Mutex<Backend>,
     info: HidDeviceInfo,
     channel: u16,
     timeout: Option<Duration>,
@@ -89,21 +124,41 @@ impl HidTransport {
             .map_err(|_| Error::Transport("hidapi poisoned".into()))?;
         let path =
             CString::new(info.path.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let device = api.open_path(&path).map_err(|e| {
-            let m = e.to_string();
-            if cfg!(target_os = "linux")
-                && (m.contains("ermission") || m.contains("Failed to open"))
-            {
-                Error::Transport(format!(
-                    "{m}: no access to {}; install udev rules for USB vendor 2c97 (see the README)",
-                    info.path
-                ))
-            } else {
-                Error::Transport(m)
+        let device = match api.open_path(&path) {
+            Ok(d) => Backend::Hid(d),
+            Err(e) => {
+                let m = e.to_string();
+                #[cfg(target_os = "linux")]
+                if m.contains("ermission") || m.contains("Failed to open") {
+                    drop(api);
+                    return Self::open_usbfs(info).map_err(|u| {
+                        Error::Transport(format!(
+                            "{m}: no access to {} (raw USB fallback: {u}); install udev rules for USB vendor 2c97 (see the README)",
+                            info.path
+                        ))
+                    });
+                }
+                return Err(Error::Transport(m));
             }
-        })?;
+        };
         Ok(Self {
             device: Mutex::new(device),
+            info: info.clone(),
+            channel: DEFAULT_CHANNEL,
+            timeout: None,
+        })
+    }
+
+    /// Open a device over raw USB (usbfs) instead of hidraw. [`Self::open`]
+    /// does this by itself when hidraw access is denied. The kernel HID
+    /// driver is detached from the interface until the transport is dropped.
+    #[cfg(target_os = "linux")]
+    pub fn open_usbfs(info: &HidDeviceInfo) -> Result<Self> {
+        Ok(Self {
+            device: Mutex::new(Backend::Usb(super::usbfs::UsbHid::open(
+                &info.path,
+                info.product_id,
+            )?)),
             info: info.clone(),
             channel: DEFAULT_CHANNEL,
             timeout: None,
@@ -139,6 +194,16 @@ impl HidTransport {
         self.timeout = timeout;
     }
 
+    /// How the device is reached: `"hidraw"` (hidapi), or `"usbfs"` for the
+    /// Linux raw USB fallback.
+    pub fn backend(&self) -> &'static str {
+        match &*self.device.lock().unwrap_or_else(|e| e.into_inner()) {
+            Backend::Hid(_) => "hidraw",
+            #[cfg(target_os = "linux")]
+            Backend::Usb(_) => "usbfs",
+        }
+    }
+
     /// Information about the opened device.
     pub fn info(&self) -> &HidDeviceInfo {
         &self.info
@@ -158,7 +223,7 @@ impl HidTransport {
         let start = Instant::now();
         let mut buf = [0u8; PACKET_SIZE + 1];
         loop {
-            let n = dev.read_timeout(&mut buf, 500).map_err(map_hid_err)?;
+            let n = dev.read_timeout(&mut buf, 500)?;
             if n == 0 {
                 if start.elapsed() > timeout {
                     return Err(Error::Timeout);
@@ -177,16 +242,13 @@ impl HidTransport {
             .lock()
             .map_err(|_| Error::Transport("device mutex poisoned".into()))?;
         for packet in framing::encode(self.channel, apdu, PACKET_SIZE) {
-            let mut report = Vec::with_capacity(PACKET_SIZE + 1);
-            report.push(0x00); // report id
-            report.extend_from_slice(&packet);
-            dev.write(&report).map_err(map_hid_err)?;
+            dev.write(&packet)?;
         }
         let mut decoder = framing::Decoder::new(self.channel);
         let start = Instant::now();
         let mut buf = [0u8; PACKET_SIZE + 1];
         loop {
-            let n = dev.read_timeout(&mut buf, 500).map_err(map_hid_err)?;
+            let n = dev.read_timeout(&mut buf, 500)?;
             if n == 0 {
                 if let Some(t) = self.timeout
                     && start.elapsed() > t

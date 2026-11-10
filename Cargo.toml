@@ -35,8 +35,8 @@ lto = true
 
 [features]
 default = ["hid"]
-## Native USB HID transport (hidapi)
-hid = ["dep:hidapi"]
+## Native USB HID transport (hidapi; raw USB fallback on Linux)
+hid = ["dep:hidapi", "dep:rawusb"]
 ## Browser WebHID transport (wasm32 only)
 webhid = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:futures-channel", "dep:futures-util"]
 ## Offline genuine check (device attestation against pinned issuer keys, no network)
@@ -86,6 +86,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 rsurl = { version = "0.1.22", default-features = false, features = ["purecrypto-tls", "json", "tokio-rt"], optional = true }
 hidapi = { version = "2.6.7", optional = true }
 tokio = { version = "1.54.1", features = ["net", "time"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rawusb = { version = "0.1.7", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 serde-wasm-bindgen = { version = "0.6", optional = true }

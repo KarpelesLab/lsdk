@@ -204,6 +204,13 @@ udevadm control --reload-rules && udevadm trigger
 
 Then replug the device. Without (e)logind seat management, use `MODE="0666"`.
 
+When the hidraw node isn't accessible but the USB device node is (for
+instance, you are in a group that owns `/dev/bus/usb`), the native transport
+falls back to raw USB through usbfs, using [rawusb](https://crates.io/crates/rawusb).
+It detaches the kernel HID driver from the interface while in use and re-attaches
+it when the transport is dropped. `lsdk --usbfs …` (or `HidTransport::open_usbfs`)
+forces this path. The browser always needs the hidraw rule.
+
 ## Requirements
 
 Rust 1.95+ (edition 2024). Native HID on Linux needs `libudev`.

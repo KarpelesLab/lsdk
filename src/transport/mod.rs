@@ -4,6 +4,8 @@ use crate::error::Result;
 
 #[cfg(all(feature = "hid", not(target_arch = "wasm32")))]
 pub mod hid;
+#[cfg(all(feature = "hid", target_os = "linux"))]
+mod usbfs;
 
 #[cfg(all(feature = "webhid", target_arch = "wasm32"))]
 pub mod webhid;
