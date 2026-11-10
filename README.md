@@ -133,12 +133,14 @@ lsdk sol transfer --to ... --amount 0.1 --blockhash ...
 On Linux the device node is root-only by default; both the CLI and the
 browser (WebHID) need a udev rule:
 
+As root:
+
 ```sh
-sudo tee /etc/udev/rules.d/20-hw1.rules <<'RULES'
+cat > /etc/udev/rules.d/20-hw1.rules <<'EOF'
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
 KERNEL=="hidraw*", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
-RULES
-sudo udevadm control --reload-rules && sudo udevadm trigger
+EOF
+udevadm control --reload-rules && udevadm trigger
 ```
 
 Then replug the device. Without (e)logind seat management, use `MODE="0666"`.
