@@ -18,7 +18,6 @@ const replace = ref(true)
 const loading = ref(null)
 const mem = ref(null)
 const apps = ref(null)
-const fwHash = ref(null)
 
 const recovery = computed(() => !!state.info?.version?.flags?.isInRecoveryMode)
 const caPublic = computed(() => {
@@ -134,7 +133,6 @@ const delAll = () => guard(async () => {
   apps.value = []
   log('ok', 'all apps deleted')
 })
-const hashFw = () => guard(async () => { fwHash.value = await secure('firmware hash', 'hashFirmware') })
 </script>
 
 <template>
@@ -203,7 +201,6 @@ const hashFw = () => guard(async () => { fwHash.value = await secure('firmware h
         <div class="spacer"></div>
         <button class="small" :disabled="!!state.busy" @click="loadMem">Memory</button>
         <button class="small" :disabled="!!state.busy" @click="loadApps">List apps</button>
-        <button class="small" :disabled="!!state.busy" @click="hashFw">Firmware hash</button>
         <button class="small danger" :disabled="!!state.busy" @click="delAll">Delete all apps</button>
       </div>
       <dl v-if="mem" class="kv" style="margin-top:10px">
@@ -212,7 +209,6 @@ const hashFw = () => guard(async () => { fwHash.value = await secure('firmware h
         <dt>Free</dt><dd>{{ kb(mem.freeSize) }}</dd>
         <dt>App slots</dt><dd>{{ mem.usedAppSlots }} / {{ mem.totalAppSlots }}</dd>
       </dl>
-      <p v-if="fwHash" class="small-text">Firmware hash: <span class="mono" style="word-break:break-all">{{ fwHash }}</span></p>
       <table v-if="apps" style="margin-top:10px">
         <thead><tr><th>App</th><th>Flags</th><th>Hash</th><th></th></tr></thead>
         <tbody>

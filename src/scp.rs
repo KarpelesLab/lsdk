@@ -615,9 +615,23 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         self.exchange(ins::DELETE_ALL_APPS, &[]).await.map(|_| ())
     }
 
-    /// Hash of the installed firmware.
-    pub async fn hash_firmware(&mut self) -> Result<Vec<u8>> {
-        self.exchange(ins::HASH_FIRMWARE, &[]).await
+    /// Firmware integrity hash over `[address, address + length)`.
+    /// **Vendor HSM sessions only**: the dashboard refuses it on channels
+    /// authenticated with a custom CA or a foreign key.
+    pub async fn hash_firmware(&mut self, address: u32, length: u32) -> Result<Vec<u8>> {
+        let mut d = address.to_be_bytes().to_vec();
+        d.extend_from_slice(&length.to_be_bytes());
+        d.resize(24, 0);
+        self.exchange(ins::HASH_FIRMWARE, &d)
+            .await
+            .map_err(|e| match e {
+                Error::Status(sw) if (sw.0 >> 8) == 0x66 || (sw.0 >> 8) == 0x6d => {
+                    Error::App(format!(
+                        "firmware hash is reserved to vendor HSM sessions (device answered {sw})"
+                    ))
+                }
+                e => e,
+            })
     }
 
     /// Install a custom CA over the default channel (recovery mode; the

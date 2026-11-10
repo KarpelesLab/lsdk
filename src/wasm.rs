@@ -805,7 +805,15 @@ impl HwDevice {
                 .list_apps()
                 .await
                 .and_then(|v| to_js(&v).map_err(|_| Error::App("js".into()))),
-            "hashFirmware" => chan.hash_firmware().await.map(|h| hex::encode(h).into()),
+            "hashFirmware" => {
+                let mut it = arg.split(',').map(|v| {
+                    u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).unwrap_or(0)
+                });
+                let (a, l) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
+                chan.hash_firmware(a, l)
+                    .await
+                    .map(|h| hex::encode(h).into())
+            }
             "deleteAllApps" => chan.delete_all_apps().await.map(|_| JsValue::UNDEFINED),
             "resetEndorsement" => chan.reset_endorsement().await.map(|_| JsValue::UNDEFINED),
             "deleteApp" => chan.delete_app(&arg).await.map(|_| JsValue::UNDEFINED),

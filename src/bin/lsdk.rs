@@ -322,10 +322,16 @@ enum FirmwareCmd {
     Update,
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair,
-    /// Hash of the installed firmware (secure channel).
+    /// Firmware integrity hash (vendor HSM sessions only: refused with a custom CA).
     Hash {
         #[arg(long)]
         key: Option<std::path::PathBuf>,
+        /// Start address (hex).
+        #[arg(long, default_value = "0")]
+        address: String,
+        /// Length (hex).
+        #[arg(long, default_value = "0")]
+        length: String,
     },
 }
 
@@ -983,12 +989,25 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Battery => print(&open(&cli)?.get_battery_status().await?),
         Cmd::Firmware {
-            cmd: FirmwareCmd::Hash { key },
+            cmd:
+                FirmwareCmd::Hash {
+                    key,
+                    address,
+                    length,
+                },
         } => {
+            let hexnum = |s: &str| {
+                u32::from_str_radix(s.trim_start_matches("0x"), 16)
+                    .map_err(|e| Error::InvalidInput(e.to_string()))
+            };
+            let (address, length) = (hexnum(address)?, hexnum(length)?);
             let d = open(&cli)?;
             let root = root_key(key.as_ref())?;
             let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
-            println!("{}", hex::encode(chan.hash_firmware().await?));
+            println!(
+                "{}",
+                hex::encode(chan.hash_firmware(address, length).await?)
+            );
         }
         Cmd::Firmware { cmd } => {
             let d = open(&cli)?;
