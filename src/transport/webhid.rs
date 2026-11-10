@@ -145,7 +145,13 @@ impl WebHidTransport {
     /// Open a specific `HIDDevice`.
     pub async fn open_device(device: HidDevice) -> Result<Self> {
         if !device.opened() {
-            JsFuture::from(device.open()).await.map_err(js_err)?;
+            JsFuture::from(device.open()).await.map_err(|e| match js_err(e) {
+                Error::Transport(m) if m.contains("Failed to open") => Error::Transport(format!(
+                    "{m} The OS denied access: close other wallet software using the device; on Linux, \
+                     install udev rules granting access to USB vendor 2c97 (see the README), then replug it."
+                )),
+                e => e,
+            })?;
         }
         let (tx, rx): (UnboundedSender<Packet>, _) = unbounded();
         let tx2 = tx.clone();
