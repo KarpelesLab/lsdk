@@ -240,9 +240,7 @@ fn safe_chunks(payload: &[u8], legacy_chain_id: Option<u64>) -> Vec<&[u8]> {
     }
     let mut size = MAX_CHUNK;
     if let Some(chain_id) = legacy_chain_id {
-        let cid_len = if chain_id == 0 {
-            1
-        } else if chain_id < 0x80 {
+        let cid_len = if chain_id < 0x80 {
             1
         } else {
             1 + (8 - chain_id.leading_zeros() as usize / 8)
