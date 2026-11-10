@@ -35,6 +35,7 @@ fn js_err(e: Error) -> JsValue {
         Error::Disconnected => "Disconnected",
         Error::DashboardExpected => "DashboardExpected",
         Error::NoDevice => "NoDevice",
+        Error::NotFound(_) => "NotFound",
         Error::Status(_) => "Status",
         _ => "Error",
     };
