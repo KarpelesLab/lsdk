@@ -72,15 +72,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // Poll until an authorized device shows up again (it re-enumerates when an
 // app opens or closes, and reboots during firmware updates).
-export async function reconnect({ timeout = 30000, quiet = false } = {}) {
+export async function reconnect({ timeout = 30000, quiet = false, exclude = null } = {}) {
   state.reconnecting = true
   const until = Date.now() + timeout
   try {
     await sleep(300)
     for (;;) {
       // The user may have picked the device again meanwhile (Connect button),
-      // e.g. when it re-enumerated under a new USB product id.
-      if (state.connected && state.device && !state.device.disconnected) return state.device
+      // e.g. when it re-enumerated under a new USB product id. `exclude` is the
+      // handle we are waiting to replace (it may not be flagged as gone yet).
+      const cur = state.device
+      if (state.connected && cur && cur !== exclude && !cur.disconnected) return cur
       try {
         const dev = await HwDevice.reconnect()
         setDevice(dev)
@@ -206,8 +208,28 @@ export async function ensureApp(name) {
 export async function waitDevice(phase = 'reboot', timeout = 600000) {
   state.fwPhase = phase
   log('info', 'waiting for the device to restart…')
-  await reconnect({ timeout })
-  await refreshInfo().catch(() => {})
+  const old = state.device
+  // First see the current device go away: it can take a moment after the
+  // last APDU, and reconnecting before that would pick up the dying handle.
+  const gone = Date.now() + 30000
+  while (old && !old.disconnected && Date.now() < gone) await sleep(250)
+  if (old && !old.disconnected) {
+    log('warn', 'the device did not restart, checking its state')
+  } else {
+    state.connected = false
+  }
+  await reconnect({ timeout, exclude: old && old.disconnected ? old : null })
+  // A fresh read is required: decisions are taken on it.
+  for (let i = 0; ; i++) {
+    try {
+      await refreshInfo()
+      if (state.info?.version || state.info?.app || state.info?.locked) return
+    } catch (e) {
+      if (i >= 5) throw new Error(`cannot read the device state after restart: ${errorText(e)}`)
+    }
+    if (i >= 5) throw new Error('cannot read the device state after restart')
+    await sleep(1000)
+  }
 }
 
 // While the device sits in bootloader mode, flash what its installed firmware
@@ -233,7 +255,7 @@ export async function finishBootloaderUpdate() {
   try {
     await flashWhileBootloader()
     state.fwPhase = 'done'
-    log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
+    log('ok', `firmware is now ${state.info?.version?.seVersion ?? state.info?.app?.version ?? 'updated'}`)
   } catch (e) {
     state.fwPhase = null
     throw e

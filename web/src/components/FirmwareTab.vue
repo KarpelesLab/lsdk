@@ -36,7 +36,7 @@ const start = () => guard(async () => {
   await flashWhileBootloader()
   phase.value = 'done'
   update.value = undefined
-  log('ok', `firmware is now ${state.info?.version?.seVersion ?? 'updated'}`)
+  log('ok', `firmware is now ${state.info?.version?.seVersion ?? state.info?.app?.version ?? 'updated'}`)
 })
 
 const finish = () => guard(finishBootloaderUpdate)
