@@ -8,7 +8,9 @@ use serde::Serialize;
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::hsm::{self, HsmEvent};
-use crate::manager::api::{self, Application, DeviceVersion, FinalFirmware, ManagerApi, McuVersion, OsuFirmware};
+use crate::manager::api::{
+    self, Application, DeviceVersion, FinalFirmware, ManagerApi, McuVersion, OsuFirmware,
+};
 use crate::os::{InstalledApp, OsVersion};
 use crate::transport::Transport;
 
@@ -24,7 +26,10 @@ pub struct Manager {
 
 impl Default for Manager {
     fn default() -> Self {
-        Self { api: ManagerApi::default(), hsm_url: hsm::DEFAULT_BASE_URL.into() }
+        Self {
+            api: ManagerApi::default(),
+            hsm_url: hsm::DEFAULT_BASE_URL.into(),
+        }
     }
 }
 
@@ -76,15 +81,25 @@ pub struct HsmListedApp {
 
 impl Manager {
     pub fn new(api_base: impl Into<String>, hsm_base: impl Into<String>) -> Self {
-        Self { api: ManagerApi::new(api_base), hsm_url: hsm_base.into() }
+        Self {
+            api: ManagerApi::new(api_base),
+            hsm_url: hsm_base.into(),
+        }
     }
 
     async fn ensure_dashboard<T: Transport>(&self, device: &Device<T>) -> Result<()> {
-        if device.is_on_dashboard().await? { Ok(()) } else { Err(Error::DashboardExpected) }
+        if device.is_on_dashboard().await? {
+            Ok(())
+        } else {
+            Err(Error::DashboardExpected)
+        }
     }
 
     /// Read the device version and resolve it against the manager API.
-    pub async fn firmware_context<T: Transport>(&self, device: &Device<T>) -> Result<FirmwareContext> {
+    pub async fn firmware_context<T: Transport>(
+        &self,
+        device: &Device<T>,
+    ) -> Result<FirmwareContext> {
         let os = device.get_version().await?;
         self.firmware_context_for(os).await
     }
@@ -96,9 +111,17 @@ impl Manager {
         let firmware = if os.is_osu || os.is_bootloader {
             None
         } else {
-            Some(self.api.get_firmware_version(device_version.id, &os.version(), provider).await?)
+            Some(
+                self.api
+                    .get_firmware_version(device_version.id, &os.version(), provider)
+                    .await?,
+            )
         };
-        Ok(FirmwareContext { os, device_version, firmware })
+        Ok(FirmwareContext {
+            os,
+            device_version,
+            firmware,
+        })
     }
 
     /// Run the genuine check. Returns `true` if the HSM vouches for the device.
@@ -110,9 +133,15 @@ impl Manager {
     ) -> Result<bool> {
         self.ensure_dashboard(device).await?;
         let ctx = self.firmware_context(device).await?;
-        let fw = ctx.firmware.ok_or_else(|| Error::App("device is updating its firmware".into()))?;
+        let fw = ctx
+            .firmware
+            .ok_or_else(|| Error::App("device is updating its firmware".into()))?;
         let target = ctx.os.target_id.to_string();
-        let url = hsm::build_url(&self.hsm_url, "/genuine", &[("targetId", &target), ("perso", &fw.perso)]);
+        let url = hsm::build_url(
+            &self.hsm_url,
+            "/genuine",
+            &[("targetId", &target), ("perso", &fw.perso)],
+        );
         let out = hsm::run(device.transport(), &url, on_event).await?;
         Ok(out.result.as_ref().and_then(|v| v.as_str()) == Some(GENUINE_RESULT))
     }
@@ -125,9 +154,15 @@ impl Manager {
     ) -> Result<Vec<HsmListedApp>> {
         self.ensure_dashboard(device).await?;
         let ctx = self.firmware_context(device).await?;
-        let fw = ctx.firmware.ok_or_else(|| Error::App("device is updating its firmware".into()))?;
+        let fw = ctx
+            .firmware
+            .ok_or_else(|| Error::App("device is updating its firmware".into()))?;
         let target = ctx.os.target_id.to_string();
-        let url = hsm::build_url(&self.hsm_url, "/apps/list", &[("targetId", &target), ("perso", &fw.perso)]);
+        let url = hsm::build_url(
+            &self.hsm_url,
+            "/apps/list",
+            &[("targetId", &target), ("perso", &fw.perso)],
+        );
         let out = hsm::run(device.transport(), &url, on_event).await?;
         match out.result {
             Some(v) => Ok(serde_json::from_value(v)?),
@@ -137,11 +172,16 @@ impl Manager {
 
     /// App catalog available for this device and firmware.
     pub async fn catalog(&self, os: &OsVersion) -> Result<Vec<Application>> {
-        self.api.get_apps_by_target(os.target_id, &os.version(), os.provider_id()).await
+        self.api
+            .get_apps_by_target(os.target_id, &os.version(), os.provider_id())
+            .await
     }
 
     /// Installed apps (via `LIST_APPS`) with their catalog metadata.
-    pub async fn installed_apps<T: Transport>(&self, device: &Device<T>) -> Result<Vec<InstalledAppInfo>> {
+    pub async fn installed_apps<T: Transport>(
+        &self,
+        device: &Device<T>,
+    ) -> Result<Vec<InstalledAppInfo>> {
         let installed = device.list_apps().await?;
         if installed.is_empty() {
             return Ok(Vec::new());
@@ -151,7 +191,10 @@ impl Manager {
         Ok(installed
             .into_iter()
             .enumerate()
-            .map(|(i, installed)| InstalledAppInfo { installed, catalog: meta.get(i).cloned().flatten() })
+            .map(|(i, installed)| InstalledAppInfo {
+                installed,
+                catalog: meta.get(i).cloned().flatten(),
+            })
             .collect())
     }
 
@@ -205,19 +248,25 @@ impl Manager {
                 .iter()
                 .find(|a| a.version_name.eq_ignore_ascii_case(n))
                 .cloned()
-                .ok_or_else(|| Error::NotFound(format!("app {n:?} is not available for this device")))
+                .ok_or_else(|| {
+                    Error::NotFound(format!("app {n:?} is not available for this device"))
+                })
         };
         let app = find(name)?;
         let installed = device.list_apps().await?;
         let mut plan = Vec::new();
         if let Some(parent) = app.parent_name.as_deref()
-            && !installed.iter().any(|a| a.name.eq_ignore_ascii_case(parent)) {
-                plan.push(find(parent)?);
-            }
+            && !installed
+                .iter()
+                .any(|a| a.name.eq_ignore_ascii_case(parent))
+        {
+            plan.push(find(parent)?);
+        }
         plan.push(app);
         for app in &plan {
             let label = app.version_name.clone();
-            self.install_app(device, &os, app, &mut |ev| on_event(&label, ev)).await?;
+            self.install_app(device, &os, app, &mut |ev| on_event(&label, ev))
+                .await?;
         }
         Ok(())
     }
@@ -285,20 +334,41 @@ impl Manager {
         let provider = os.provider_id();
         let dv = self.api.get_device_version(os.target_id, provider).await?;
         let osu = if os.is_osu {
-            Some(self.api.get_osu_version(dv.id, &os.raw_version, provider).await?)
+            Some(
+                self.api
+                    .get_osu_version(dv.id, &os.raw_version, provider)
+                    .await?,
+            )
         } else {
-            let current = self.api.get_firmware_version(dv.id, &os.version(), provider).await?;
-            self.api.get_latest_firmware(current.id, dv.id, provider).await?
+            let current = self
+                .api
+                .get_firmware_version(dv.id, &os.version(), provider)
+                .await?;
+            self.api
+                .get_latest_firmware(current.id, dv.id, provider)
+                .await?
         };
         let Some(osu) = osu else { return Ok(None) };
-        let final_firmware = self.api.get_final_firmware_by_id(osu.next_se_firmware_final_version).await?;
+        let final_firmware = self
+            .api
+            .get_final_firmware_by_id(osu.next_se_firmware_final_version)
+            .await?;
         let mcus = self.api.get_mcu_versions().await?;
         let should_flash_mcu = match mcus.iter().find(|m| m.name == os.mcu_version()) {
             Some(current) => !final_firmware.mcu_versions.contains(&current.id),
             None if os.mcu_version().is_empty() => false,
-            None => return Err(Error::NotFound(format!("unknown MCU version {:?}", os.mcu_version()))),
+            None => {
+                return Err(Error::NotFound(format!(
+                    "unknown MCU version {:?}",
+                    os.mcu_version()
+                )));
+            }
         };
-        Ok(Some(FirmwareUpdate { osu, final_firmware, should_flash_mcu }))
+        Ok(Some(FirmwareUpdate {
+            osu,
+            final_firmware,
+            should_flash_mcu,
+        }))
     }
 
     /// Step 1 of a firmware update: install the OS updater. The user confirms
@@ -311,7 +381,9 @@ impl Manager {
     ) -> Result<()> {
         let os = device.get_version().await?;
         if os.is_bootloader {
-            return Err(Error::App("device is in bootloader mode, flash the MCU instead".into()));
+            return Err(Error::App(
+                "device is in bootloader mode, flash the MCU instead".into(),
+            ));
         }
         let target = os.target_id.to_string();
         let url = hsm::build_url(
@@ -354,15 +426,32 @@ impl Manager {
                     && update.final_firmware.mcu_versions.contains(&m.id)
             })
             .collect();
-        let mcu = api::find_best_mcu(&candidates).ok_or_else(|| Error::NotFound("no suitable MCU version".into()))?;
-        let bootloader_version: String =
-            mcu.from_bootloader_version.split('.').take(3).collect::<Vec<_>>().join(".");
+        let mcu = api::find_best_mcu(&candidates)
+            .ok_or_else(|| Error::NotFound("no suitable MCU version".into()))?;
+        let bootloader_version: String = mcu
+            .from_bootloader_version
+            .split('.')
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(".");
         let is_mcu = os.maj_min() == bootloader_version;
-        let version = if is_mcu { mcu.name.clone() } else { bootloader_version };
+        let version = if is_mcu {
+            mcu.name.clone()
+        } else {
+            bootloader_version
+        };
         let target = os.target_id.to_string();
-        let url = hsm::build_url(&self.hsm_url, "/mcu", &[("targetId", &target), ("version", &version)]);
+        let url = hsm::build_url(
+            &self.hsm_url,
+            "/mcu",
+            &[("targetId", &target), ("version", &version)],
+        );
         match hsm::run(device.transport(), &url, on_event).await {
-            Ok(_) | Err(Error::Disconnected) => Ok(if is_mcu { FlashKind::Mcu } else { FlashKind::Bootloader }),
+            Ok(_) | Err(Error::Disconnected) => Ok(if is_mcu {
+                FlashKind::Mcu
+            } else {
+                FlashKind::Bootloader
+            }),
             Err(e) => Err(e),
         }
     }

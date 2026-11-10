@@ -46,7 +46,9 @@ impl<T: Transport> Device<T> {
             StatusWord::DEVICE_NOT_ONBOARDED | StatusWord::DEVICE_NOT_ONBOARDED_2 => {
                 Err(Error::App("device is not onboarded".into()))
             }
-            StatusWord::CLA_NOT_SUPPORTED | StatusWord::INS_NOT_SUPPORTED => Err(Error::DashboardExpected),
+            StatusWord::CLA_NOT_SUPPORTED | StatusWord::INS_NOT_SUPPORTED => {
+                Err(Error::DashboardExpected)
+            }
             _ => OsVersion::parse(&r.ok()?),
         }
     }
@@ -81,7 +83,9 @@ impl<T: Transport> Device<T> {
         let r = self.exchange(&os::open_app(name)).await?;
         match r.sw {
             StatusWord::OK => Ok(()),
-            StatusWord::APP_NOT_FOUND | StatusWord(0x6984) => Err(Error::NotFound(format!("app {name:?} is not installed"))),
+            StatusWord::APP_NOT_FOUND | StatusWord(0x6984) => {
+                Err(Error::NotFound(format!("app {name:?} is not installed")))
+            }
             sw if sw.is_refused() => Err(Error::UserRefused),
             sw => Err(sw.into()),
         }
@@ -136,9 +140,10 @@ impl<T: Transport> Device<T> {
         let p = self.get_battery_raw(BatteryStatusKind::Percentage).await?;
         st.percentage = p.first().copied().filter(|v| *v <= 100);
         if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Voltage).await
-            && v.len() >= 2 {
-                st.voltage_mv = Some(u16::from_be_bytes([v[0], v[1]]));
-            }
+            && v.len() >= 2
+        {
+            st.voltage_mv = Some(u16::from_be_bytes([v[0], v[1]]));
+        }
         if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Temperature).await {
             st.temperature_c = v.first().map(|b| *b as i8);
         }
@@ -146,13 +151,14 @@ impl<T: Transport> Device<T> {
             st.current_ma = v.first().map(|b| *b as i8);
         }
         if let Ok(v) = self.get_battery_raw(BatteryStatusKind::Flags).await
-            && v.len() >= 4 {
-                let f = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
-                st.raw_flags = Some(f);
-                st.charging = f & 0x1 != 0;
-                st.usb_connected = f & 0x2 != 0;
-                st.ble_connected = f & 0x4 != 0;
-            }
+            && v.len() >= 4
+        {
+            let f = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
+            st.raw_flags = Some(f);
+            st.charging = f & 0x1 != 0;
+            st.usb_connected = f & 0x2 != 0;
+            st.ble_connected = f & 0x4 != 0;
+        }
         Ok(st)
     }
 }
@@ -163,7 +169,10 @@ mod tests {
     use crate::transport::mock::MockTransport;
 
     fn block_on<F: core::future::Future>(f: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f)
     }
 
     #[test]

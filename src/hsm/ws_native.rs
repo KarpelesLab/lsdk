@@ -23,7 +23,9 @@ impl WsConn {
 
     /// Next text message, `None` when the connection is closed.
     pub async fn recv(&mut self) -> Result<Option<String>> {
-        let Some(ws) = self.ws.as_mut() else { return Ok(None) };
+        let Some(ws) = self.ws.as_mut() else {
+            return Ok(None);
+        };
         while let Some(msg) = ws.next().await {
             match msg {
                 Ok(Message::Text(t)) => return Ok(Some(t.to_string())),
@@ -44,7 +46,10 @@ impl WsConn {
     }
 
     pub async fn send(&mut self, text: String) -> Result<()> {
-        let ws = self.ws.as_mut().ok_or_else(|| Error::WebSocket("closed".into()))?;
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| Error::WebSocket("closed".into()))?;
         ws.send(Message::text(text)).await.map_err(ws_err)
     }
 

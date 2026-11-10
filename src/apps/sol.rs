@@ -10,8 +10,8 @@ use crate::path::{DerivationPath, HARDENED};
 use crate::transport::Transport;
 
 pub use outscript::solana::{
-    SolanaInstruction, SolanaKey, SolanaTx, new_solana_tx, set_compute_unit_limit, set_compute_unit_price,
-    spl_transfer_instruction, transfer_instruction,
+    SolanaInstruction, SolanaKey, SolanaTx, new_solana_tx, set_compute_unit_limit,
+    set_compute_unit_price, spl_transfer_instruction, transfer_instruction,
 };
 
 const CLA: u8 = 0xe0;
@@ -49,7 +49,8 @@ fn hardened(path: &DerivationPath) -> DerivationPath {
 /// Bytes signed by the device for a transaction (its message).
 pub fn message_bytes(tx: &SolanaTx) -> Result<Vec<u8>> {
     if let Some(m) = &tx.message_v1 {
-        m.to_bytes().map_err(|e| Error::InvalidInput(format!("{e:?}")))
+        m.to_bytes()
+            .map_err(|e| Error::InvalidInput(format!("{e:?}")))
     } else if let Some(m) = &tx.message_v0 {
         Ok(m.to_bytes())
     } else {
@@ -78,7 +79,10 @@ impl<'d, T: Transport> SolApp<'d, T> {
         let mut last = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let more = if i + 1 < n { P2_MORE } else { 0 };
-            let r = self.device.exchange(&Apdu::with_data(CLA, ins, p1, p2 | more, chunk.to_vec())).await?;
+            let r = self
+                .device
+                .exchange(&Apdu::with_data(CLA, ins, p1, p2 | more, chunk.to_vec()))
+                .await?;
             if !r.sw.is_ok() {
                 return Err(map_err(r.sw));
             }
@@ -90,7 +94,10 @@ impl<'d, T: Transport> SolApp<'d, T> {
 
     /// App configuration.
     pub async fn get_configuration(&self) -> Result<SolConfig> {
-        let r = self.device.exchange(&Apdu::new(CLA, INS_GET_CONFIG, 0, 0)).await?;
+        let r = self
+            .device
+            .exchange(&Apdu::new(CLA, INS_GET_CONFIG, 0, 0))
+            .await?;
         if !r.sw.is_ok() {
             return Err(map_err(r.sw));
         }
@@ -107,7 +114,9 @@ impl<'d, T: Transport> SolApp<'d, T> {
 
     /// Public key (base58 address) for a path.
     pub async fn get_address(&self, path: &DerivationPath, display: bool) -> Result<String> {
-        let d = self.send_chunked(INS_GET_PUBKEY, display as u8, &hardened(path).encode()).await?;
+        let d = self
+            .send_chunked(INS_GET_PUBKEY, display as u8, &hardened(path).encode())
+            .await?;
         if d.len() != 32 {
             return Err(Error::InvalidResponse("bad public key length".into()));
         }
@@ -117,12 +126,18 @@ impl<'d, T: Transport> SolApp<'d, T> {
     }
 
     /// Sign a serialized message, returns the 64-byte signature.
-    pub async fn sign_message_bytes(&self, path: &DerivationPath, message: &[u8]) -> Result<[u8; 64]> {
+    pub async fn sign_message_bytes(
+        &self,
+        path: &DerivationPath,
+        message: &[u8],
+    ) -> Result<[u8; 64]> {
         let mut payload = vec![1u8];
         payload.extend_from_slice(&hardened(path).encode());
         payload.extend_from_slice(message);
         let d = self.send_chunked(INS_SIGN, 0x01, &payload).await?;
-        d.as_slice().try_into().map_err(|_| Error::InvalidResponse("bad signature length".into()))
+        d.as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidResponse("bad signature length".into()))
     }
 
     /// Sign a transaction in place (the device key must be one of its signers).
@@ -132,14 +147,19 @@ impl<'d, T: Transport> SolApp<'d, T> {
         let (keys, header) = match (&tx.message_v1, &tx.message_v0) {
             (Some(m), _) => (m.account_keys.clone(), m.header.num_required_signatures),
             (None, Some(m)) => (m.account_keys.clone(), m.header.num_required_signatures),
-            (None, None) => (tx.message.account_keys.clone(), tx.message.header.num_required_signatures),
+            (None, None) => (
+                tx.message.account_keys.clone(),
+                tx.message.header.num_required_signatures,
+            ),
         };
         let n = header as usize;
         let idx = keys
             .iter()
             .take(n)
             .position(|k| *k == pubkey)
-            .ok_or_else(|| Error::InvalidInput("device key is not a signer of this transaction".into()))?;
+            .ok_or_else(|| {
+                Error::InvalidInput("device key is not a signer of this transaction".into())
+            })?;
         let sig = self.sign_message_bytes(path, &message_bytes(tx)?).await?;
         if tx.signatures.len() < n {
             tx.signatures.resize(n, Vec::new());
@@ -149,21 +169,34 @@ impl<'d, T: Transport> SolApp<'d, T> {
     }
 
     /// Sign an off-chain message (already serialized in the off-chain format).
-    pub async fn sign_offchain_message(&self, path: &DerivationPath, message: &[u8]) -> Result<[u8; 64]> {
+    pub async fn sign_offchain_message(
+        &self,
+        path: &DerivationPath,
+        message: &[u8],
+    ) -> Result<[u8; 64]> {
         let mut payload = vec![1u8];
         payload.extend_from_slice(&hardened(path).encode());
         payload.extend_from_slice(message);
         let d = self.send_chunked(INS_SIGN_OFFCHAIN, 0x01, &payload).await?;
-        d.as_slice().try_into().map_err(|_| Error::InvalidResponse("bad signature length".into()))
+        d.as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidResponse("bad signature length".into()))
     }
 }
 
 /// Build an unsigned SOL transfer.
-pub fn build_transfer(from: &str, to: &str, lamports: u64, recent_blockhash: &str) -> Result<SolanaTx> {
-    let parse = |s: &str| SolanaKey::parse(s).map_err(|e| Error::InvalidInput(format!("{s:?}: {e:?}")));
+pub fn build_transfer(
+    from: &str,
+    to: &str,
+    lamports: u64,
+    recent_blockhash: &str,
+) -> Result<SolanaTx> {
+    let parse =
+        |s: &str| SolanaKey::parse(s).map_err(|e| Error::InvalidInput(format!("{s:?}: {e:?}")));
     let from = parse(from)?;
     let ix = transfer_instruction(from, parse(to)?, lamports);
-    new_solana_tx(from, parse(recent_blockhash)?, &[ix]).map_err(|e| Error::InvalidInput(format!("{e:?}")))
+    new_solana_tx(from, parse(recent_blockhash)?, &[ix])
+        .map_err(|e| Error::InvalidInput(format!("{e:?}")))
 }
 
 #[cfg(test)]
@@ -174,7 +207,8 @@ mod tests {
     fn transfer() {
         let a = "83astBRguLMdt2h5U1Tpdq5tjFoJ6noeGwaY3mDLVcri";
         let b = "11111111111111111111111111111112";
-        let tx = build_transfer(a, b, 1000, "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N").unwrap();
+        let tx =
+            build_transfer(a, b, 1000, "EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1N").unwrap();
         let m = message_bytes(&tx).unwrap();
         assert_eq!(m[0], 1); // one required signature
     }

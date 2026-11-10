@@ -78,7 +78,7 @@ pub struct OsVersion {
     pub hw_version: String,
     /// Installed language pack id.
     pub language_id: Option<u32>,
-    /// Ledger Recover state.
+    /// Seed recovery service state.
     pub recover_state: Option<u32>,
     /// Parsed flags.
     pub flags: SeFlags,
@@ -121,7 +121,11 @@ impl OsVersion {
             recover_state: None,
         };
 
-        let str_of = |b: &[u8]| String::from_utf8_lossy(b).trim_end_matches('\0').to_string();
+        let str_of = |b: &[u8]| {
+            String::from_utf8_lossy(b)
+                .trim_end_matches('\0')
+                .to_string()
+        };
         let int_of = |b: &[u8]| b.iter().fold(0u32, |acc, x| (acc << 8) | *x as u32);
 
         if is_bootloader {
@@ -147,7 +151,8 @@ impl OsVersion {
             if bl_supported {
                 v.mcu_bootloader_version = r.opt_lv()?.map(str_of).unwrap_or_default();
             }
-            let hw_supported = matches!(model, Some(DeviceModel::NanoX)) && version_gte(se, (2, 0, 0));
+            let hw_supported =
+                matches!(model, Some(DeviceModel::NanoX)) && version_gte(se, (2, 0, 0));
             v.hw_version = if hw_supported {
                 r.opt_lv()?.map(hex::encode).unwrap_or_default()
             } else {
@@ -190,7 +195,11 @@ impl OsVersion {
 
     /// `major.minor[.patch]` part of the version.
     pub fn maj_min(&self) -> String {
-        self.raw_version.split('-').next().unwrap_or_default().to_string()
+        self.raw_version
+            .split('-')
+            .next()
+            .unwrap_or_default()
+            .to_string()
     }
 
     /// Provider name (suffix after `-` that is not `osu`), if any.
@@ -275,14 +284,20 @@ impl AppAndVersion {
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut r = Reader::new(data);
         if r.u8()? != 1 {
-            return Err(Error::InvalidResponse("unknown GET_APP_AND_VERSION format".into()));
+            return Err(Error::InvalidResponse(
+                "unknown GET_APP_AND_VERSION format".into(),
+            ));
         }
         let name = r.lv_string()?;
         let version = r.lv_string()?;
         let flags = r
             .opt_lv()?
             .map(|b| b.iter().fold(0u32, |acc, x| (acc << 8) | *x as u32));
-        Ok(Self { name, version, flags })
+        Ok(Self {
+            name,
+            version,
+            flags,
+        })
     }
 
     /// Whether this is the dashboard rather than an app.
@@ -323,7 +338,13 @@ pub fn parse_list_apps(data: &[u8]) -> Result<Vec<InstalledApp>> {
         let hash_code_data = hex::encode(r.bytes(32)?);
         let hash = hex::encode(r.bytes(32)?);
         let name = r.lv_string()?;
-        apps.push(InstalledApp { name, blocks, flags, hash_code_data, hash });
+        apps.push(InstalledApp {
+            name,
+            blocks,
+            flags,
+            hash_code_data,
+            hash,
+        });
     }
     Ok(apps)
 }
@@ -384,7 +405,9 @@ mod tests {
 
     #[test]
     fn parse_app_version() {
-        let d = [1, 5, b'B', b'O', b'L', b'O', b'S', 5, b'1', b'.', b'4', b'.', b'1'];
+        let d = [
+            1, 5, b'B', b'O', b'L', b'O', b'S', 5, b'1', b'.', b'4', b'.', b'1',
+        ];
         let a = AppAndVersion::parse(&d).unwrap();
         assert!(a.is_dashboard());
         assert_eq!(a.version, "1.4.1");

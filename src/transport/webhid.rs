@@ -71,10 +71,24 @@ fn hid_object() -> Result<JsValue> {
 
 async fn call_hid(method: &str, args: &Array) -> Result<Vec<HidDevice>> {
     let hid = hid_object()?;
-    let f: js_sys::Function = Reflect::get(&hid, &method.into()).map_err(js_err)?.dyn_into().map_err(js_err)?;
-    let p: Promise = f.apply(&hid, args).map_err(js_err)?.dyn_into().map_err(js_err)?;
-    let list: Array = JsFuture::from(p).await.map_err(js_err)?.dyn_into().map_err(js_err)?;
-    Ok(list.iter().map(|d| d.unchecked_into::<HidDevice>()).collect())
+    let f: js_sys::Function = Reflect::get(&hid, &method.into())
+        .map_err(js_err)?
+        .dyn_into()
+        .map_err(js_err)?;
+    let p: Promise = f
+        .apply(&hid, args)
+        .map_err(js_err)?
+        .dyn_into()
+        .map_err(js_err)?;
+    let list: Array = JsFuture::from(p)
+        .await
+        .map_err(js_err)?
+        .dyn_into()
+        .map_err(js_err)?;
+    Ok(list
+        .iter()
+        .map(|d| d.unchecked_into::<HidDevice>())
+        .collect())
 }
 
 /// Open the browser picker filtered on our vendor id. Requires a user gesture.
@@ -110,13 +124,21 @@ pub struct WebHidTransport {
 impl WebHidTransport {
     /// Ask the user to pick a device, then open it.
     pub async fn request() -> Result<Self> {
-        let dev = request_devices().await?.into_iter().next().ok_or(Error::NoDevice)?;
+        let dev = request_devices()
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(Error::NoDevice)?;
         Self::open_device(dev).await
     }
 
     /// Open the first already-granted device (no picker), if any.
     pub async fn open_granted() -> Result<Self> {
-        let dev = granted_devices().await?.into_iter().next().ok_or(Error::NoDevice)?;
+        let dev = granted_devices()
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(Error::NoDevice)?;
         Self::open_device(dev).await
     }
 
@@ -128,8 +150,12 @@ impl WebHidTransport {
         let (tx, rx): (UnboundedSender<Packet>, _) = unbounded();
         let tx2 = tx.clone();
         let on_report = Closure::<dyn FnMut(JsValue)>::new(move |ev: JsValue| {
-            let Ok(data) = Reflect::get(&ev, &"data".into()) else { return };
-            let Ok(view) = data.dyn_into::<js_sys::DataView>() else { return };
+            let Ok(data) = Reflect::get(&ev, &"data".into()) else {
+                return;
+            };
+            let Ok(view) = data.dyn_into::<js_sys::DataView>() else {
+                return;
+            };
             let bytes = Uint8Array::new_with_byte_offset_and_length(
                 &view.buffer(),
                 view.byte_offset() as u32,
@@ -150,12 +176,11 @@ impl WebHidTransport {
                 let _ = tx2.unbounded_send(Err(Error::Disconnected));
             }
         });
-        if let Ok(hid) = hid_object() {
-            if let Ok(f) = Reflect::get(&hid, &"addEventListener".into()) {
-                if let Ok(f) = f.dyn_into::<js_sys::Function>() {
-                    let _ = f.call2(&hid, &"disconnect".into(), on_disconnect.as_ref());
-                }
-            }
+        if let Ok(hid) = hid_object()
+            && let Ok(f) = Reflect::get(&hid, &"addEventListener".into())
+            && let Ok(f) = f.dyn_into::<js_sys::Function>()
+        {
+            let _ = f.call2(&hid, &"disconnect".into(), on_disconnect.as_ref());
         }
 
         Ok(Self {
@@ -199,13 +224,13 @@ impl WebHidTransport {
 
 impl Drop for WebHidTransport {
     fn drop(&mut self) {
-        self.device.remove_event_listener("inputreport", self.on_report.as_ref().unchecked_ref());
-        if let Ok(hid) = hid_object() {
-            if let Ok(f) = Reflect::get(&hid, &"removeEventListener".into()) {
-                if let Ok(f) = f.dyn_into::<js_sys::Function>() {
-                    let _ = f.call2(&hid, &"disconnect".into(), self.on_disconnect.as_ref());
-                }
-            }
+        self.device
+            .remove_event_listener("inputreport", self.on_report.as_ref().unchecked_ref());
+        if let Ok(hid) = hid_object()
+            && let Ok(f) = Reflect::get(&hid, &"removeEventListener".into())
+            && let Ok(f) = f.dyn_into::<js_sys::Function>()
+        {
+            let _ = f.call2(&hid, &"disconnect".into(), self.on_disconnect.as_ref());
         }
         if self.device.opened() {
             let _ = self.device.close();
@@ -225,9 +250,15 @@ impl Transport for WebHidTransport {
         }
         for packet in framing::encode(self.channel, apdu, PACKET_SIZE) {
             let arr = Uint8Array::from(packet.as_slice());
-            JsFuture::from(self.device.send_report(0, &arr)).await.map_err(|e| {
-                if self.disconnected.get() { Error::Disconnected } else { js_err(e) }
-            })?;
+            JsFuture::from(self.device.send_report(0, &arr))
+                .await
+                .map_err(|e| {
+                    if self.disconnected.get() {
+                        Error::Disconnected
+                    } else {
+                        js_err(e)
+                    }
+                })?;
         }
         let mut decoder = framing::Decoder::new(self.channel);
         loop {

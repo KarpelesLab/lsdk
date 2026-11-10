@@ -29,7 +29,8 @@ pub fn hash160(d: &[u8]) -> [u8; 20] {
 impl Xpub {
     /// Parse a base58check `xpub`/`tpub` string.
     pub fn parse(s: &str) -> Result<Self> {
-        let raw = outscript::base58::decode(s).map_err(|e| Error::InvalidInput(format!("xpub: {e:?}")))?;
+        let raw = outscript::base58::decode(s)
+            .map_err(|e| Error::InvalidInput(format!("xpub: {e:?}")))?;
         if raw.len() != 82 {
             return Err(Error::InvalidInput("xpub: bad length".into()));
         }
@@ -45,7 +46,8 @@ impl Xpub {
             chain_code: body[13..45].try_into().unwrap(),
             public_key: body[45..78].try_into().unwrap(),
         };
-        AffinePoint::from_sec1(&x.public_key).map_err(|_| Error::InvalidInput("xpub: invalid key".into()))?;
+        AffinePoint::from_sec1(&x.public_key)
+            .map_err(|_| Error::InvalidInput("xpub: invalid key".into()))?;
         Ok(x)
     }
 
@@ -71,7 +73,9 @@ impl Xpub {
     /// Derive a non-hardened child.
     pub fn derive_child(&self, index: u32) -> Result<Self> {
         if index & 0x8000_0000 != 0 {
-            return Err(Error::InvalidInput("cannot derive hardened child from xpub".into()));
+            return Err(Error::InvalidInput(
+                "cannot derive hardened child from xpub".into(),
+            ));
         }
         let mut mac = Hmac::<Sha512>::new(&self.chain_code);
         mac.update(&self.public_key);
@@ -79,12 +83,15 @@ impl Xpub {
         let i = mac.finalize();
         let i = i.as_ref();
         let il: [u8; 32] = i[..32].try_into().unwrap();
-        let tweak = Scalar::from_bytes_be(&il).map_err(|_| Error::App("invalid child (IL >= n)".into()))?;
+        let tweak =
+            Scalar::from_bytes_be(&il).map_err(|_| Error::App("invalid child (IL >= n)".into()))?;
         let parent = AffinePoint::from_sec1(&self.public_key)
             .map_err(|_| Error::InvalidInput("invalid public key".into()))?
             .to_projective();
         let child: ProjectivePoint = ProjectivePoint::mul_generator(&tweak).add(&parent);
-        let child = child.to_affine().ok_or_else(|| Error::App("invalid child (point at infinity)".into()))?;
+        let child = child
+            .to_affine()
+            .ok_or_else(|| Error::App("invalid child (point at infinity)".into()))?;
         Ok(Xpub {
             version: self.version,
             depth: self.depth.wrapping_add(1),

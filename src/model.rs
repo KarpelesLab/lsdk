@@ -100,7 +100,11 @@ impl DeviceModel {
     pub fn block_size(self, firmware_version: &str) -> u32 {
         match self {
             DeviceModel::NanoS => {
-                if version_lt(firmware_version, (2, 0, 0)) { 4096 } else { 2048 }
+                if version_lt(firmware_version, (2, 0, 0)) {
+                    4096
+                } else {
+                    2048
+                }
             }
             DeviceModel::NanoX => 4096,
             _ => 512,
@@ -109,7 +113,10 @@ impl DeviceModel {
 
     /// Whether the model has a touch screen.
     pub fn has_touch_screen(self) -> bool {
-        matches!(self, DeviceModel::Stax | DeviceModel::Flex | DeviceModel::NanoGen5)
+        matches!(
+            self,
+            DeviceModel::Stax | DeviceModel::Flex | DeviceModel::NanoGen5
+        )
     }
 
     /// Whether the model has a battery.
@@ -127,7 +134,9 @@ impl DeviceModel {
 
     /// Identify the model from a target id.
     pub fn from_target_id(target_id: u32) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| target_id & 0xffff_0000 == m.target_id_mask())
+        Self::ALL
+            .into_iter()
+            .find(|m| target_id & 0xffff_0000 == m.target_id_mask())
     }
 
     /// Whether the given product id corresponds to bootloader mode.
@@ -148,7 +157,11 @@ pub fn parse_version(v: &str) -> (u32, u32, u32) {
         .split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<u32>().unwrap_or(0));
-    (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+    (
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+    )
 }
 
 /// `v < (maj, min, patch)`
@@ -167,11 +180,26 @@ mod tests {
 
     #[test]
     fn detect() {
-        assert_eq!(DeviceModel::from_product_id(0x5011), Some(DeviceModel::NanoSPlus));
-        assert_eq!(DeviceModel::from_product_id(0x4015), Some(DeviceModel::NanoX));
-        assert_eq!(DeviceModel::from_product_id(0x0005), Some(DeviceModel::NanoSPlus));
-        assert_eq!(DeviceModel::from_target_id(0x33100004), Some(DeviceModel::NanoSPlus));
-        assert_eq!(DeviceModel::from_target_id(0x31100004), Some(DeviceModel::NanoS));
+        assert_eq!(
+            DeviceModel::from_product_id(0x5011),
+            Some(DeviceModel::NanoSPlus)
+        );
+        assert_eq!(
+            DeviceModel::from_product_id(0x4015),
+            Some(DeviceModel::NanoX)
+        );
+        assert_eq!(
+            DeviceModel::from_product_id(0x0005),
+            Some(DeviceModel::NanoSPlus)
+        );
+        assert_eq!(
+            DeviceModel::from_target_id(0x33100004),
+            Some(DeviceModel::NanoSPlus)
+        );
+        assert_eq!(
+            DeviceModel::from_target_id(0x31100004),
+            Some(DeviceModel::NanoS)
+        );
         assert!(version_lt("1.6.1", (2, 0, 0)));
         assert!(version_gte("2.2.3-rc1", (2, 2, 3)));
     }

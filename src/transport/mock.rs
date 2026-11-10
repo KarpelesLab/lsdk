@@ -43,11 +43,10 @@ impl MockTransport {
 impl Transport for MockTransport {
     async fn exchange(&self, apdu: &[u8]) -> Result<Vec<u8>> {
         self.log.borrow_mut().push(apdu.to_vec());
-        let (expected, response) = self
-            .script
-            .borrow_mut()
-            .pop_front()
-            .ok_or_else(|| Error::Transport(format!("unexpected APDU {}", hex::encode(apdu))))?;
+        let (expected, response) =
+            self.script.borrow_mut().pop_front().ok_or_else(|| {
+                Error::Transport(format!("unexpected APDU {}", hex::encode(apdu)))
+            })?;
         if !expected.is_empty() && expected != apdu {
             return Err(Error::Transport(format!(
                 "APDU mismatch: expected {} got {}",

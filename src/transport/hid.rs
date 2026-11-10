@@ -51,8 +51,11 @@ pub struct HidTransport {
 impl HidTransport {
     /// List connected devices.
     pub fn list() -> Result<Vec<HidDeviceInfo>> {
-        let mut api = api()?.lock().map_err(|_| Error::Transport("hidapi poisoned".into()))?;
-        api.refresh_devices().map_err(|e| Error::Transport(e.to_string()))?;
+        let mut api = api()?
+            .lock()
+            .map_err(|_| Error::Transport("hidapi poisoned".into()))?;
+        api.refresh_devices()
+            .map_err(|e| Error::Transport(e.to_string()))?;
         let mut out: Vec<HidDeviceInfo> = Vec::new();
         for d in api.device_list() {
             if d.vendor_id() != VENDOR_ID {
@@ -81,10 +84,20 @@ impl HidTransport {
 
     /// Open a device by path.
     pub fn open(info: &HidDeviceInfo) -> Result<Self> {
-        let api = api()?.lock().map_err(|_| Error::Transport("hidapi poisoned".into()))?;
-        let path = CString::new(info.path.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
-        let device = api.open_path(&path).map_err(|e| Error::Transport(e.to_string()))?;
-        Ok(Self { device: Mutex::new(device), info: info.clone(), channel: DEFAULT_CHANNEL, timeout: None })
+        let api = api()?
+            .lock()
+            .map_err(|_| Error::Transport("hidapi poisoned".into()))?;
+        let path =
+            CString::new(info.path.clone()).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let device = api
+            .open_path(&path)
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        Ok(Self {
+            device: Mutex::new(device),
+            info: info.clone(),
+            channel: DEFAULT_CHANNEL,
+            timeout: None,
+        })
     }
 
     /// Open the first device found.
@@ -99,9 +112,10 @@ impl HidTransport {
         let start = Instant::now();
         loop {
             if let Some(first) = Self::list()?.first()
-                && let Ok(t) = Self::open(first) {
-                    return Ok(t);
-                }
+                && let Ok(t) = Self::open(first)
+            {
+                return Ok(t);
+            }
             if start.elapsed() > timeout {
                 return Err(Error::NoDevice);
             }
@@ -121,7 +135,10 @@ impl HidTransport {
     }
 
     fn exchange_blocking(&self, apdu: &[u8]) -> Result<Vec<u8>> {
-        let dev = self.device.lock().map_err(|_| Error::Transport("device mutex poisoned".into()))?;
+        let dev = self
+            .device
+            .lock()
+            .map_err(|_| Error::Transport("device mutex poisoned".into()))?;
         for packet in framing::encode(self.channel, apdu, PACKET_SIZE) {
             let mut report = Vec::with_capacity(PACKET_SIZE + 1);
             report.push(0x00); // report id
@@ -135,9 +152,10 @@ impl HidTransport {
             let n = dev.read_timeout(&mut buf, 500).map_err(map_hid_err)?;
             if n == 0 {
                 if let Some(t) = self.timeout
-                    && start.elapsed() > t {
-                        return Err(Error::Timeout);
-                    }
+                    && start.elapsed() > t
+                {
+                    return Err(Error::Timeout);
+                }
                 continue;
             }
             if let Some(resp) = decoder.push(&buf[..n])? {
@@ -149,7 +167,10 @@ impl HidTransport {
 
 fn map_hid_err(e: hidapi::HidError) -> Error {
     let s = e.to_string();
-    if s.contains("No such device") || s.contains("disconnected") || s.contains("Input/output error") {
+    if s.contains("No such device")
+        || s.contains("disconnected")
+        || s.contains("Input/output error")
+    {
         Error::Disconnected
     } else {
         Error::Transport(s)

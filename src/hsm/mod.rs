@@ -63,7 +63,9 @@ impl HsmEvent {
     /// Progress in `0.0..=1.0`, for progress events.
     pub fn progress(&self) -> Option<f64> {
         match self {
-            HsmEvent::Progress { index, total } if *total > 0 => Some(*index as f64 / *total as f64),
+            HsmEvent::Progress { index, total } if *total > 0 => {
+                Some(*index as f64 / *total as f64)
+            }
             _ => None,
         }
     }
@@ -96,7 +98,9 @@ fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -134,8 +138,13 @@ pub async fn run<T: Transport + ?Sized>(
 
         match msg.query.as_str() {
             "exchange" => {
-                let data = msg.data.as_ref().and_then(Value::as_str).unwrap_or_default();
-                let apdu = hex::decode(data).map_err(|e| Error::Hsm(format!("bad APDU hex: {e}")))?;
+                let data = msg
+                    .data
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let apdu =
+                    hex::decode(data).map_err(|e| Error::Hsm(format!("bad APDU hex: {e}")))?;
                 if apdu.len() < 5 {
                     return Err(Error::Hsm(format!("invalid APDU from HSM: {data}")));
                 }
@@ -144,7 +153,10 @@ pub async fn run<T: Transport + ?Sized>(
                     on_event(HsmEvent::PermissionRequested);
                 }
                 let resp = Response::from_raw(transport.exchange(&apdu).await?)?;
-                on_event(HsmEvent::Exchange { apdu, status: resp.sw.0 });
+                on_event(HsmEvent::Exchange {
+                    apdu,
+                    status: resp.sw.0,
+                });
                 let response = match resp.sw {
                     StatusWord::OK => "success",
                     StatusWord::LOCKED_DEVICE => return Err(Error::Locked),
@@ -187,14 +199,23 @@ pub async fn run<T: Transport + ?Sized>(
                             sw => sw.into(),
                         });
                     }
-                    on_event(HsmEvent::Progress { index: i + 1, total });
+                    on_event(HsmEvent::Progress {
+                        index: i + 1,
+                        total,
+                    });
                 }
-                return Ok(HsmOutcome { result: None, bulk: true });
+                return Ok(HsmOutcome {
+                    result: None,
+                    bulk: true,
+                });
             }
             "success" => {
                 let result = msg.result.or(msg.data).filter(|v| !v.is_null());
                 ws.close().await;
-                return Ok(HsmOutcome { result, bulk: false });
+                return Ok(HsmOutcome {
+                    result,
+                    bulk: false,
+                });
             }
             "error" => {
                 ws.close().await;
@@ -205,8 +226,14 @@ pub async fn run<T: Transport + ?Sized>(
                 return Err(Error::Hsm(data.unwrap_or_else(|| "unknown error".into())));
             }
             "warning" => {
-                let message = msg.data.map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()));
-                on_event(HsmEvent::Warning { message: message.unwrap_or_default() });
+                let message = msg.data.map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string())
+                });
+                on_event(HsmEvent::Warning {
+                    message: message.unwrap_or_default(),
+                });
             }
             _ => {}
         }
@@ -222,7 +249,10 @@ mod tests {
         let u = build_url(
             DEFAULT_BASE_URL,
             "/install",
-            &[("targetId", "856686596"), ("firmware", "nanos+/1.4.1/app 1")],
+            &[
+                ("targetId", "856686596"),
+                ("firmware", "nanos+/1.4.1/app 1"),
+            ],
         );
         assert_eq!(
             u,

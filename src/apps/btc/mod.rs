@@ -96,16 +96,37 @@ impl<'d, T: Transport> BtcApp<'d, T> {
         Self { device }
     }
 
-    async fn request(&self, ins: u8, data: Vec<u8>, mut interp: Option<&mut Interpreter>) -> Result<Vec<u8>> {
-        let mut r = self.device.exchange(&Apdu::with_data(CLA, ins, 0x00, P2_PROTOCOL, data)).await?;
+    async fn request(
+        &self,
+        ins: u8,
+        data: Vec<u8>,
+        mut interp: Option<&mut Interpreter>,
+    ) -> Result<Vec<u8>> {
+        let mut r = self
+            .device
+            .exchange(&Apdu::with_data(CLA, ins, 0x00, P2_PROTOCOL, data))
+            .await?;
         while r.sw.0 == SW_INTERRUPTED {
             let it = interp
                 .as_deref_mut()
                 .ok_or_else(|| Error::App("unexpected client command from the app".into()))?;
             let reply = it.execute(&r.data)?;
-            r = self.device.exchange(&Apdu::with_data(CLA_FRAMEWORK, INS_CONTINUE, 0x00, P2_PROTOCOL, reply)).await?;
+            r = self
+                .device
+                .exchange(&Apdu::with_data(
+                    CLA_FRAMEWORK,
+                    INS_CONTINUE,
+                    0x00,
+                    P2_PROTOCOL,
+                    reply,
+                ))
+                .await?;
         }
-        if r.sw.is_ok() { Ok(r.data) } else { Err(map_sw(r.sw)) }
+        if r.sw.is_ok() {
+            Ok(r.data)
+        } else {
+            Err(map_sw(r.sw))
+        }
     }
 
     fn interpreter_for(policy: &WalletPolicy) -> Interpreter {
@@ -118,12 +139,20 @@ impl<'d, T: Transport> BtcApp<'d, T> {
 
     /// Master key fingerprint.
     pub async fn get_master_fingerprint(&self) -> Result<[u8; 4]> {
-        let d = self.request(INS_GET_MASTER_FINGERPRINT, Vec::new(), None).await?;
-        d.get(..4).and_then(|s| s.try_into().ok()).ok_or_else(|| Error::InvalidResponse("fingerprint".into()))
+        let d = self
+            .request(INS_GET_MASTER_FINGERPRINT, Vec::new(), None)
+            .await?;
+        d.get(..4)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| Error::InvalidResponse("fingerprint".into()))
     }
 
     /// Extended public key at `path` (base58 string). With `display`, shown on screen.
-    pub async fn get_extended_pubkey(&self, path: &DerivationPath, display: bool) -> Result<String> {
+    pub async fn get_extended_pubkey(
+        &self,
+        path: &DerivationPath,
+        display: bool,
+    ) -> Result<String> {
         let mut data = vec![display as u8];
         data.extend(path.encode());
         let d = self.request(INS_GET_EXTENDED_PUBKEY, data, None).await?;
@@ -131,7 +160,12 @@ impl<'d, T: Transport> BtcApp<'d, T> {
     }
 
     /// Key information (`[fpr/path]xpub`) of an account, to build a policy.
-    pub async fn get_account_key(&self, kind: AddressType, testnet: bool, account: u32) -> Result<KeyInfo> {
+    pub async fn get_account_key(
+        &self,
+        kind: AddressType,
+        testnet: bool,
+        account: u32,
+    ) -> Result<KeyInfo> {
         let fpr = self.get_master_fingerprint().await?;
         let path = kind.account_path(testnet, account);
         let xpub = self.get_extended_pubkey(&path, false).await?;
@@ -139,8 +173,16 @@ impl<'d, T: Transport> BtcApp<'d, T> {
     }
 
     /// Default single-sig policy for an account.
-    pub async fn default_policy(&self, kind: AddressType, testnet: bool, account: u32) -> Result<WalletPolicy> {
-        Ok(WalletPolicy::default_single_sig(kind, self.get_account_key(kind, testnet, account).await?))
+    pub async fn default_policy(
+        &self,
+        kind: AddressType,
+        testnet: bool,
+        account: u32,
+    ) -> Result<WalletPolicy> {
+        Ok(WalletPolicy::default_single_sig(
+            kind,
+            self.get_account_key(kind, testnet, account).await?,
+        ))
     }
 
     /// Register a (non-default) wallet policy. Returns `(policy id, hmac)`.
@@ -149,7 +191,9 @@ impl<'d, T: Transport> BtcApp<'d, T> {
         let mut data = varint::encode(ser.len() as u64);
         data.extend(ser);
         let mut it = Self::interpreter_for(policy);
-        let d = self.request(INS_REGISTER_WALLET, data, Some(&mut it)).await?;
+        let d = self
+            .request(INS_REGISTER_WALLET, data, Some(&mut it))
+            .await?;
         if d.len() < 64 {
             return Err(Error::InvalidResponse("register_wallet".into()));
         }
@@ -171,7 +215,9 @@ impl<'d, T: Transport> BtcApp<'d, T> {
         data.push(change as u8);
         data.extend_from_slice(&index.to_be_bytes());
         let mut it = Self::interpreter_for(policy);
-        let d = self.request(INS_GET_WALLET_ADDRESS, data, Some(&mut it)).await?;
+        let d = self
+            .request(INS_GET_WALLET_ADDRESS, data, Some(&mut it))
+            .await?;
         Ok(String::from_utf8_lossy(&d).into_owned())
     }
 
@@ -187,11 +233,15 @@ impl<'d, T: Transport> BtcApp<'d, T> {
         display: bool,
     ) -> Result<String> {
         let policy = WalletPolicy::default_single_sig(kind, key.clone());
-        let addr = self.get_wallet_address(&policy, None, change, index, display).await?;
+        let addr = self
+            .get_wallet_address(&policy, None, change, index, display)
+            .await?;
         let xpub = Xpub::parse(&key.xpub)?;
         let (_, local, _) = psbt::derive_script(&xpub, kind, testnet, change as u32, index)?;
         if local != addr {
-            return Err(Error::App(format!("address mismatch: device {addr}, local {local}")));
+            return Err(Error::App(format!(
+                "address mismatch: device {addr}, local {local}"
+            )));
         }
         Ok(addr)
     }
@@ -229,11 +279,19 @@ impl<'d, T: Transport> BtcApp<'d, T> {
         data.extend_from_slice(&policy.id());
         data.extend_from_slice(hmac.unwrap_or(&[0u8; 32]));
         self.request(INS_SIGN_PSBT, data, Some(&mut it)).await?;
-        it.into_yielded().iter().map(|y| psbt::parse_yielded(y)).collect()
+        it.into_yielded()
+            .iter()
+            .map(|y| psbt::parse_yielded(y))
+            .collect()
     }
 
     /// Sign a PSBT and insert the signatures, returning the updated PSBT.
-    pub async fn sign_psbt_into(&self, psbt_bytes: &[u8], policy: &WalletPolicy, hmac: Option<&[u8; 32]>) -> Result<Vec<u8>> {
+    pub async fn sign_psbt_into(
+        &self,
+        psbt_bytes: &[u8],
+        policy: &WalletPolicy,
+        hmac: Option<&[u8; 32]>,
+    ) -> Result<Vec<u8>> {
         let sigs = self.sign_psbt(psbt_bytes, policy, hmac).await?;
         psbt::insert_signatures(psbt_bytes, &sigs)
     }
@@ -248,6 +306,8 @@ impl<'d, T: Transport> BtcApp<'d, T> {
         data.extend(varint::encode(message.len() as u64));
         data.extend_from_slice(&root);
         let d = self.request(INS_SIGN_MESSAGE, data, Some(&mut it)).await?;
-        d.as_slice().try_into().map_err(|_| Error::InvalidResponse("bad message signature length".into()))
+        d.as_slice()
+            .try_into()
+            .map_err(|_| Error::InvalidResponse("bad message signature length".into()))
     }
 }

@@ -160,16 +160,30 @@ fn http_err(e: reqwest::Error) -> Error {
 
 impl ManagerApi {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), client: reqwest::Client::new(), salt: "0".into() }
+        Self {
+            base_url: base_url.into(),
+            client: reqwest::Client::new(),
+            salt: "0".into(),
+        }
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
+    async fn get<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.client.get(&url).query(query).send().await.map_err(http_err)?;
+        let resp = self
+            .client
+            .get(&url)
+            .query(query)
+            .send()
+            .await
+            .map_err(http_err)?;
         let status = resp.status();
         if status.as_u16() == 404 {
             return Err(Error::NotFound(format!("{path} {query:?}")));
@@ -184,7 +198,10 @@ impl ManagerApi {
     pub async fn get_device_version(&self, target_id: u32, provider: u32) -> Result<DeviceVersion> {
         self.get(
             "/get_device_version",
-            &[("target_id", target_id.to_string()), ("provider", provider.to_string())],
+            &[
+                ("target_id", target_id.to_string()),
+                ("provider", provider.to_string()),
+            ],
         )
         .await
     }
@@ -208,7 +225,12 @@ impl ManagerApi {
     }
 
     /// OSU from its version name (e.g. `1.4.1-osu`).
-    pub async fn get_osu_version(&self, device_version: u32, version_name: &str, provider: u32) -> Result<OsuFirmware> {
+    pub async fn get_osu_version(
+        &self,
+        device_version: u32,
+        version_name: &str,
+        provider: u32,
+    ) -> Result<OsuFirmware> {
         self.get(
             "/get_osu_version",
             &[
@@ -222,7 +244,8 @@ impl ManagerApi {
 
     /// Final firmware by id.
     pub async fn get_final_firmware_by_id(&self, id: u32) -> Result<FinalFirmware> {
-        self.get(&format!("/firmware_final_versions/{id}"), &[]).await
+        self.get(&format!("/firmware_final_versions/{id}"), &[])
+            .await
     }
 
     /// Latest available OSU for a device, `None` when up to date.
@@ -236,7 +259,10 @@ impl ManagerApi {
             .get(
                 "/get_latest_firmware",
                 &[
-                    ("current_se_firmware_final_version", current_final_id.to_string()),
+                    (
+                        "current_se_firmware_final_version",
+                        current_final_id.to_string(),
+                    ),
                     ("device_version", device_version.to_string()),
                     ("provider", provider.to_string()),
                     ("salt", self.salt.clone()),
@@ -276,7 +302,13 @@ impl ManagerApi {
     /// Resolve installed app hashes to catalog entries.
     pub async fn get_apps_by_hash(&self, hashes: &[String]) -> Result<Vec<Option<Application>>> {
         let url = format!("{}/v2/apps/hash", self.base_url);
-        let resp = self.client.post(&url).json(hashes).send().await.map_err(http_err)?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(hashes)
+            .send()
+            .await
+            .map_err(http_err)?;
         if !resp.status().is_success() {
             return Err(Error::Http(format!("{url}: HTTP {}", resp.status())));
         }
@@ -286,5 +318,6 @@ impl ManagerApi {
 
 /// Pick the highest MCU version from a list (semver-ish comparison on `name`).
 pub fn find_best_mcu(mcus: &[McuVersion]) -> Option<&McuVersion> {
-    mcus.iter().max_by_key(|m| crate::model::parse_version(&m.name))
+    mcus.iter()
+        .max_by_key(|m| crate::model::parse_version(&m.name))
 }

@@ -20,12 +20,24 @@ pub struct Apdu {
 impl Apdu {
     /// Build an APDU without data.
     pub const fn new(cla: u8, ins: u8, p1: u8, p2: u8) -> Self {
-        Self { cla, ins, p1, p2, data: Vec::new() }
+        Self {
+            cla,
+            ins,
+            p1,
+            p2,
+            data: Vec::new(),
+        }
     }
 
     /// Build an APDU with data.
     pub fn with_data(cla: u8, ins: u8, p1: u8, p2: u8, data: impl Into<Vec<u8>>) -> Self {
-        Self { cla, ins, p1, p2, data: data.into() }
+        Self {
+            cla,
+            ins,
+            p1,
+            p2,
+            data: data.into(),
+        }
     }
 
     /// Serialize to raw bytes. Fails if data exceeds 255 bytes.
@@ -47,8 +59,18 @@ impl Apdu {
         if raw.len() < 4 {
             return Err(Error::InvalidInput("APDU shorter than 4 bytes".into()));
         }
-        let data = if raw.len() > 5 { raw[5..].to_vec() } else { Vec::new() };
-        Ok(Self { cla: raw[0], ins: raw[1], p1: raw[2], p2: raw[3], data })
+        let data = if raw.len() > 5 {
+            raw[5..].to_vec()
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            cla: raw[0],
+            ins: raw[1],
+            p1: raw[2],
+            p2: raw[3],
+            data,
+        })
     }
 }
 
@@ -155,7 +177,9 @@ impl Response {
     /// Parse a raw response (`data || sw1 sw2`).
     pub fn from_raw(mut raw: Vec<u8>) -> Result<Self> {
         if raw.len() < 2 {
-            return Err(Error::InvalidResponse("response shorter than 2 bytes".into()));
+            return Err(Error::InvalidResponse(
+                "response shorter than 2 bytes".into(),
+            ));
         }
         let n = raw.len();
         let sw = StatusWord(u16::from_be_bytes([raw[n - 2], raw[n - 1]]));
@@ -165,7 +189,11 @@ impl Response {
 
     /// Return the data if the status is `0x9000`, otherwise an error.
     pub fn ok(self) -> Result<Vec<u8>> {
-        if self.sw.is_ok() { Ok(self.data) } else { Err(self.sw.into()) }
+        if self.sw.is_ok() {
+            Ok(self.data)
+        } else {
+            Err(self.sw.into())
+        }
     }
 
     /// Re-serialize to `data || sw`.
@@ -242,7 +270,11 @@ impl<'a> Reader<'a> {
 
     /// Read a length-prefixed field, `None` if nothing is left.
     pub fn opt_lv(&mut self) -> Result<Option<&'a [u8]>> {
-        if self.is_empty() { Ok(None) } else { self.lv().map(Some) }
+        if self.is_empty() {
+            Ok(None)
+        } else {
+            self.lv().map(Some)
+        }
     }
 
     /// Read a length-prefixed string (lossy UTF-8).

@@ -39,7 +39,10 @@ impl FromStr for DerivationPath {
 
     fn from_str(s: &str) -> Result<Self> {
         let s = s.trim();
-        let s = s.strip_prefix("m/").or_else(|| s.strip_prefix("m")).unwrap_or(s);
+        let s = s
+            .strip_prefix("m/")
+            .or_else(|| s.strip_prefix("m"))
+            .unwrap_or(s);
         if s.is_empty() {
             return Ok(Self(Vec::new()));
         }
@@ -53,12 +56,16 @@ impl FromStr for DerivationPath {
                 .parse()
                 .map_err(|_| Error::InvalidInput(format!("invalid path component {part:?}")))?;
             if n >= HARDENED {
-                return Err(Error::InvalidInput(format!("path component {part:?} out of range")));
+                return Err(Error::InvalidInput(format!(
+                    "path component {part:?} out of range"
+                )));
             }
             out.push(if hardened { n | HARDENED } else { n });
         }
         if out.len() > 10 {
-            return Err(Error::InvalidInput("derivation path too long (max 10)".into()));
+            return Err(Error::InvalidInput(
+                "derivation path too long (max 10)".into(),
+            ));
         }
         Ok(Self(out))
     }
@@ -93,7 +100,10 @@ mod tests {
         let p: DerivationPath = "m/44'/60'/0'/0/0".parse().unwrap();
         assert_eq!(p.0, vec![44 | HARDENED, 60 | HARDENED, HARDENED, 0, 0]);
         assert_eq!(p.to_string(), "m/44'/60'/0'/0/0");
-        assert_eq!(hex::encode(p.encode()), "058000002c8000003c800000000000000000000000");
+        assert_eq!(
+            hex::encode(p.encode()),
+            "058000002c8000003c800000000000000000000000"
+        );
         let q: DerivationPath = "44h/501h/0h".parse().unwrap();
         assert_eq!(q.0.len(), 3);
         assert!("m/abc".parse::<DerivationPath>().is_err());

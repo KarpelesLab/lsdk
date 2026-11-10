@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy (native, all features)
+        run: cargo clippy --features full --all-targets -- -D warnings
+      - name: Clippy (CLI)
+        run: cargo clippy --features cli -- -D warnings
+      - name: Clippy (wasm)
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features wasm -- -D warnings
+      - name: Feature matrix
+        run: |
+          for f in "" hid manager-api hsm manager eth btc sol; do
+            echo "::group::features=[$f]"
+            cargo check --no-default-features --features "$f"
+            echo "::endgroup::"
+          done
+      - name: Tests
+        run: cargo test --features full
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run wasm
+        working-directory: web
+      - run: npm run build
+        working-directory: web

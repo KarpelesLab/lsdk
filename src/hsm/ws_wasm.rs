@@ -43,14 +43,23 @@ impl WsConn {
         let t = tx;
         let on_close = Closure::<dyn FnMut(JsValue)>::new(move |ev: JsValue| {
             let ev = ev.unchecked_into::<CloseEvent>();
-            let _ = t.unbounded_send(WsEvent::Close(format!("code {} {}", ev.code(), ev.reason())));
+            let _ = t.unbounded_send(WsEvent::Close(format!(
+                "code {} {}",
+                ev.code(),
+                ev.reason()
+            )));
         });
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
-        let mut conn = Self { ws, rx, _handlers: [on_open, on_message, on_error, on_close], closed: false };
+        let mut conn = Self {
+            ws,
+            rx,
+            _handlers: [on_open, on_message, on_error, on_close],
+            closed: false,
+        };
         match conn.rx.next().await {
             Some(WsEvent::Open) => Ok(conn),
             Some(WsEvent::Close(r)) => Err(Error::WebSocket(format!("connection failed: {r}"))),
@@ -76,7 +85,9 @@ impl WsConn {
     }
 
     pub async fn send(&mut self, text: String) -> Result<()> {
-        self.ws.send_with_str(&text).map_err(|e| Error::WebSocket(format!("{e:?}")))
+        self.ws
+            .send_with_str(&text)
+            .map_err(|e| Error::WebSocket(format!("{e:?}")))
     }
 
     pub async fn close(&mut self) {

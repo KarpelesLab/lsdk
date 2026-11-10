@@ -55,7 +55,12 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(channel: u16) -> Self {
-        Self { channel, expected_len: None, seq: 0, data: Vec::new() }
+        Self {
+            channel,
+            expected_len: None,
+            seq: 0,
+            data: Vec::new(),
+        }
     }
 
     /// Feed one HID report. Returns `Some(response)` once complete.
@@ -65,14 +70,22 @@ impl Decoder {
         }
         let channel = u16::from_be_bytes([packet[0], packet[1]]);
         if channel != self.channel {
-            return Err(Error::Framing(format!("unexpected channel 0x{channel:04x}")));
+            return Err(Error::Framing(format!(
+                "unexpected channel 0x{channel:04x}"
+            )));
         }
         if packet[2] != TAG_APDU {
-            return Err(Error::Framing(format!("unexpected tag 0x{:02x}", packet[2])));
+            return Err(Error::Framing(format!(
+                "unexpected tag 0x{:02x}",
+                packet[2]
+            )));
         }
         let seq = u16::from_be_bytes([packet[3], packet[4]]);
         if seq != self.seq {
-            return Err(Error::Framing(format!("unexpected sequence {seq}, wanted {}", self.seq)));
+            return Err(Error::Framing(format!(
+                "unexpected sequence {seq}, wanted {}",
+                self.seq
+            )));
         }
         let mut payload = &packet[5..];
         if seq == 0 {

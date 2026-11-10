@@ -13,7 +13,11 @@ use lsdk::{Device, Error, Result};
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "lsdk", version, about = "Manage and use hardware wallets over USB HID")]
+#[command(
+    name = "lsdk",
+    version,
+    about = "Manage and use hardware wallets over USB HID"
+)]
 struct Cli {
     /// Device path (from `lsdk list`); defaults to the first device.
     #[arg(long, global = true)]
@@ -281,7 +285,12 @@ async fn run(cli: Cli) -> Result<()> {
             }
             let version = d.get_version().await?;
             let name = d.get_device_name().await.ok();
-            print(&Info { model: version.model().map(|m| m.name()), version, app, name });
+            print(&Info {
+                model: version.model().map(|m| m.name()),
+                version,
+                app,
+                name,
+            });
         }
         Cmd::Apps => print(&manager.installed_apps(&open(&cli)?).await?),
         Cmd::Catalog { target_id, version } => {
@@ -299,7 +308,13 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let mut out = std::io::stdout().lock();
             for a in apps {
-                let line = format!("{:<32} {:<10} {:>8} {}", a.version_name, a.version, a.bytes.unwrap_or(0), a.hash);
+                let line = format!(
+                    "{:<32} {:<10} {:>8} {}",
+                    a.version_name,
+                    a.version,
+                    a.bytes.unwrap_or(0),
+                    a.hash
+                );
                 if writeln!(out, "{line}").is_err() {
                     break;
                 }
@@ -324,7 +339,9 @@ async fn run(cli: Cli) -> Result<()> {
             println!("installed {name}");
         }
         Cmd::Uninstall { name } => {
-            manager.uninstall_app_by_name(&open(&cli)?, name, &mut progress).await?;
+            manager
+                .uninstall_app_by_name(&open(&cli)?, name, &mut progress)
+                .await?;
             println!("uninstalled {name}");
         }
         Cmd::Open { name } => open(&cli)?.open_app(name).await?,
@@ -339,7 +356,10 @@ async fn run(cli: Cli) -> Result<()> {
                 (_, None) => println!("firmware {} is up to date", os.se_version),
                 (FirmwareCmd::Check, Some(u)) => print(&u),
                 (FirmwareCmd::Update, Some(u)) => {
-                    eprintln!("installing OS updater {} -> {}", os.se_version, u.final_firmware.name);
+                    eprintln!(
+                        "installing OS updater {} -> {}",
+                        os.se_version, u.final_firmware.name
+                    );
                     if !os.is_osu && !os.is_bootloader {
                         manager.install_osu(&d, &u, &mut progress).await?;
                     }
@@ -347,7 +367,8 @@ async fn run(cli: Cli) -> Result<()> {
                     if u.should_flash_mcu {
                         for _ in 0..6 {
                             eprintln!("waiting for the device (bootloader)...");
-                            let d = Device::new(HidTransport::wait_and_open(Duration::from_secs(300))?);
+                            let d =
+                                Device::new(HidTransport::wait_and_open(Duration::from_secs(300))?);
                             let os = d.get_version().await?;
                             if !os.is_bootloader {
                                 break;
@@ -362,14 +383,17 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Apdu { hex } => {
-            let raw = hex::decode(hex.replace(' ', "")).map_err(|e| Error::InvalidInput(e.to_string()))?;
+            let raw = hex::decode(hex.replace(' ', ""))
+                .map_err(|e| Error::InvalidInput(e.to_string()))?;
             println!("{}", hex::encode(open(&cli)?.exchange_raw(&raw).await?));
         }
         Cmd::Eth { cmd } => {
             let d = open(&cli)?;
             let app = eth::EthApp::new(&d);
             match cmd {
-                EthCmd::Address { path: p, display } => print(&app.get_address(&path(p)?, *display, false).await?),
+                EthCmd::Address { path: p, display } => {
+                    print(&app.get_address(&path(p)?, *display, false).await?)
+                }
                 EthCmd::SignTx {
                     path: p,
                     chain_id,
@@ -384,11 +408,17 @@ async fn run(cli: Cli) -> Result<()> {
                     token,
                     decimals,
                 } => {
-                    let mut tx = eth::EvmTx { chain_id: *chain_id, nonce: *nonce, gas: *gas, ..Default::default() };
+                    let mut tx = eth::EvmTx {
+                        chain_id: *chain_id,
+                        nonce: *nonce,
+                        gas: *gas,
+                        ..Default::default()
+                    };
                     match token {
                         Some(token) => {
                             tx.to = token.clone();
-                            tx.data = eth::erc20_transfer_data(to, &eth::parse_units(value, *decimals)?)?;
+                            tx.data =
+                                eth::erc20_transfer_data(to, &eth::parse_units(value, *decimals)?)?;
                         }
                         None => {
                             tx.to = to.clone();
@@ -406,7 +436,9 @@ async fn run(cli: Cli) -> Result<()> {
                         tx.tx_type = eth::EvmTxType::Eip1559;
                         tx.gas_tip_cap = wei(priority_fee)?;
                         tx.gas_fee_cap = wei(max_fee.as_deref().ok_or_else(|| {
-                            Error::InvalidInput("--max-fee (gwei) or --gas-price is required".into())
+                            Error::InvalidInput(
+                                "--max-fee (gwei) or --gas-price is required".into(),
+                            )
                         })?)?;
                     }
                     app.sign_tx(&path(p)?, &mut tx).await?;
@@ -414,14 +446,20 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("0x{}", hex::encode(raw));
                 }
                 EthCmd::SignRaw { path: p, hex } => {
-                    let raw =
-                        hex::decode(hex.trim_start_matches("0x")).map_err(|e| Error::InvalidInput(e.to_string()))?;
-                    let mut tx = eth::EvmTx::parse_transaction(&raw).map_err(|e| Error::InvalidInput(format!("{e:?}")))?;
+                    let raw = hex::decode(hex.trim_start_matches("0x"))
+                        .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                    let mut tx = eth::EvmTx::parse_transaction(&raw)
+                        .map_err(|e| Error::InvalidInput(format!("{e:?}")))?;
                     app.sign_tx(&path(p)?, &mut tx).await?;
-                    println!("0x{}", hex::encode(tx.to_bytes().map_err(|e| Error::App(format!("{e:?}")))?));
+                    println!(
+                        "0x{}",
+                        hex::encode(tx.to_bytes().map_err(|e| Error::App(format!("{e:?}")))?)
+                    );
                 }
                 EthCmd::SignMessage { path: p, message } => {
-                    let sig = app.sign_personal_message(&path(p)?, message.as_bytes()).await?;
+                    let sig = app
+                        .sign_personal_message(&path(p)?, message.as_bytes())
+                        .await?;
                     println!("0x{}", hex::encode(sig.to_rsv()));
                 }
             }
@@ -430,23 +468,47 @@ async fn run(cli: Cli) -> Result<()> {
             let d = open(&cli)?;
             let app = btc::BtcApp::new(&d);
             match cmd {
-                BtcCmd::Xpub { kind, account, testnet, display } => {
+                BtcCmd::Xpub {
+                    kind,
+                    account,
+                    testnet,
+                    display,
+                } => {
                     let kind = btc::AddressType::parse(kind)?;
                     let p = kind.account_path(*testnet, *account);
                     let xpub = app.get_extended_pubkey(&p, *display).await?;
                     let fpr = app.get_master_fingerprint().await?;
                     println!("{}", btc::KeyInfo::new(fpr, p, xpub));
                 }
-                BtcCmd::Address { kind, account, index, change, testnet, display } => {
+                BtcCmd::Address {
+                    kind,
+                    account,
+                    index,
+                    change,
+                    testnet,
+                    display,
+                } => {
                     let kind = btc::AddressType::parse(kind)?;
                     let key = app.get_account_key(kind, *testnet, *account).await?;
-                    println!("{}", app.get_wallet_address_checked(kind, *testnet, &key, *change, *index, *display).await?);
+                    println!(
+                        "{}",
+                        app.get_wallet_address_checked(
+                            kind, *testnet, &key, *change, *index, *display
+                        )
+                        .await?
+                    );
                 }
                 BtcCmd::SignMessage { path: p, message } => {
                     let sig = app.sign_message(&path(p)?, message.as_bytes()).await?;
                     println!("{}", outscript::base64::encode(&sig));
                 }
-                BtcCmd::SignPsbt { kind, account, testnet, no_finalize, psbt } => {
+                BtcCmd::SignPsbt {
+                    kind,
+                    account,
+                    testnet,
+                    no_finalize,
+                    psbt,
+                } => {
                     let kind = btc::AddressType::parse(kind)?;
                     let bytes = outscript::psbt::Psbt::decode_base64(psbt.trim())
                         .map_err(|e| Error::InvalidInput(format!("{e:?}")))?;
@@ -464,8 +526,15 @@ async fn run(cli: Cli) -> Result<()> {
             let d = open(&cli)?;
             let app = sol::SolApp::new(&d);
             match cmd {
-                SolCmd::Address { path: p, display } => println!("{}", app.get_address(&path(p)?, *display).await?),
-                SolCmd::Transfer { path: p, to, amount, blockhash } => {
+                SolCmd::Address { path: p, display } => {
+                    println!("{}", app.get_address(&path(p)?, *display).await?)
+                }
+                SolCmd::Transfer {
+                    path: p,
+                    to,
+                    amount,
+                    blockhash,
+                } => {
                     let p = path(p)?;
                     let from = app.get_address(&p, false).await?;
                     let lamports: u64 = eth::parse_units(amount, 9)?
@@ -484,7 +553,10 @@ async fn run(cli: Cli) -> Result<()> {
 
 fn main() {
     let cli = Cli::parse();
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
     if let Err(e) = rt.block_on(run(cli)) {
         eprintln!("error: {e}");
         std::process::exit(1);

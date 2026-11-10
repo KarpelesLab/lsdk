@@ -56,13 +56,19 @@ impl AddressType {
     /// Account derivation path `m/purpose'/coin'/account'`.
     pub fn account_path(self, testnet: bool, account: u32) -> DerivationPath {
         use crate::path::HARDENED;
-        DerivationPath(vec![self.purpose() | HARDENED, (testnet as u32) | HARDENED, account | HARDENED])
+        DerivationPath(vec![
+            self.purpose() | HARDENED,
+            (testnet as u32) | HARDENED,
+            account | HARDENED,
+        ])
     }
 
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s.to_ascii_lowercase().as_str() {
             "legacy" | "pkh" | "p2pkh" | "44" => AddressType::Legacy,
-            "nested" | "nested-segwit" | "sh-wpkh" | "p2sh-p2wpkh" | "49" => AddressType::NestedSegwit,
+            "nested" | "nested-segwit" | "sh-wpkh" | "p2sh-p2wpkh" | "49" => {
+                AddressType::NestedSegwit
+            }
             "segwit" | "native-segwit" | "wpkh" | "p2wpkh" | "84" => AddressType::NativeSegwit,
             "taproot" | "tr" | "p2tr" | "86" => AddressType::Taproot,
             _ => return Err(Error::InvalidInput(format!("unknown address type {s:?}"))),
@@ -80,18 +86,34 @@ pub struct KeyInfo {
 
 impl KeyInfo {
     pub fn new(fingerprint: [u8; 4], path: DerivationPath, xpub: String) -> Self {
-        Self { fingerprint: Some(fingerprint), path, xpub }
+        Self {
+            fingerprint: Some(fingerprint),
+            path,
+            xpub,
+        }
     }
 
     pub fn parse(s: &str) -> Result<Self> {
         let Some(rest) = s.strip_prefix('[') else {
-            return Ok(Self { fingerprint: None, path: DerivationPath::default(), xpub: s.to_string() });
+            return Ok(Self {
+                fingerprint: None,
+                path: DerivationPath::default(),
+                xpub: s.to_string(),
+            });
         };
-        let (origin, xpub) = rest.split_once(']').ok_or_else(|| Error::InvalidInput("bad key origin".into()))?;
+        let (origin, xpub) = rest
+            .split_once(']')
+            .ok_or_else(|| Error::InvalidInput("bad key origin".into()))?;
         let (fpr, path) = origin.split_once('/').unwrap_or((origin, ""));
         let fpr = hex::decode(fpr).map_err(|_| Error::InvalidInput("bad fingerprint".into()))?;
-        let fpr: [u8; 4] = fpr.try_into().map_err(|_| Error::InvalidInput("bad fingerprint".into()))?;
-        Ok(Self { fingerprint: Some(fpr), path: path.parse()?, xpub: xpub.to_string() })
+        let fpr: [u8; 4] = fpr
+            .try_into()
+            .map_err(|_| Error::InvalidInput("bad fingerprint".into()))?;
+        Ok(Self {
+            fingerprint: Some(fpr),
+            path: path.parse()?,
+            xpub: xpub.to_string(),
+        })
     }
 }
 
@@ -101,7 +123,13 @@ impl core::fmt::Display for KeyInfo {
             None => f.write_str(&self.xpub),
             Some(fpr) => {
                 let path = self.path.to_string();
-                write!(f, "[{}{}]{}", hex::encode(fpr), path.strip_prefix('m').unwrap_or(&path), self.xpub)
+                write!(
+                    f,
+                    "[{}{}]{}",
+                    hex::encode(fpr),
+                    path.strip_prefix('m').unwrap_or(&path),
+                    self.xpub
+                )
             }
         }
     }
@@ -117,8 +145,16 @@ pub struct WalletPolicy {
 }
 
 impl WalletPolicy {
-    pub fn new(name: impl Into<String>, descriptor_template: impl Into<String>, keys: Vec<KeyInfo>) -> Self {
-        Self { name: name.into(), descriptor_template: descriptor_template.into(), keys }
+    pub fn new(
+        name: impl Into<String>,
+        descriptor_template: impl Into<String>,
+        keys: Vec<KeyInfo>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            descriptor_template: descriptor_template.into(),
+            keys,
+        }
     }
 
     /// Default single-sig policy for an account key.
@@ -138,7 +174,11 @@ impl WalletPolicy {
         out.extend(varint::encode(self.descriptor_template.len() as u64));
         out.extend_from_slice(&sha256(self.descriptor_template.as_bytes()));
         out.extend(varint::encode(self.keys.len() as u64));
-        let leaves = self.key_strings().iter().map(|k| leaf_hash(k.as_bytes())).collect();
+        let leaves = self
+            .key_strings()
+            .iter()
+            .map(|k| leaf_hash(k.as_bytes()))
+            .collect();
         out.extend_from_slice(MerkleTree::new(leaves).root());
         out
     }

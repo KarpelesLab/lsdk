@@ -3,7 +3,7 @@
 //! The app does not receive large data structures (wallet policies, PSBT
 //! maps, messages) directly: it receives commitments (merkle roots) and asks
 //! the client for the pieces it needs through "client commands" sent with
-//! status `0xE000`. Port of Ledger's reference client (Apache-2.0).
+//! status `0xE000`. Port of the vendor's reference Rust client (Apache-2.0).
 
 use purecrypto::hash::sha256;
 
@@ -48,7 +48,11 @@ pub struct MerkleTree {
 
 impl MerkleTree {
     pub fn new(leaves: Vec<[u8; 32]>) -> Self {
-        let root = if leaves.is_empty() { [0u8; 32] } else { Self::root_of(&leaves) };
+        let root = if leaves.is_empty() {
+            [0u8; 32]
+        } else {
+            Self::root_of(&leaves)
+        };
         Self { leaves, root }
     }
 
@@ -206,11 +210,17 @@ impl Interpreter {
                 let root = &req[..32];
                 let (size, n) = varint::decode(&req[32..]).ok_or_else(|| bad("bad varint"))?;
                 let (index, _) = varint::decode(&req[32 + n..]).ok_or_else(|| bad("bad varint"))?;
-                let tree = self.trees.iter().find(|t| t.root()[..] == *root).ok_or_else(|| bad("unknown root"))?;
+                let tree = self
+                    .trees
+                    .iter()
+                    .find(|t| t.root()[..] == *root)
+                    .ok_or_else(|| bad("unknown root"))?;
                 if index >= size || size != tree.len() as u64 {
                     return Err(bad("invalid index or size"));
                 }
-                let proof = tree.proof(index as usize).ok_or_else(|| bad("invalid index"))?;
+                let proof = tree
+                    .proof(index as usize)
+                    .ok_or_else(|| bad("invalid index"))?;
                 let mut out = tree.leaves[index as usize].to_vec();
                 out.push(proof.len() as u8);
                 let first = proof.len().min(6);
@@ -227,8 +237,16 @@ impl Interpreter {
                 if req.len() < 64 {
                     return Err(bad("short GET_MERKLE_LEAF_INDEX"));
                 }
-                let tree = self.trees.iter().find(|t| t.root()[..] == req[..32]).ok_or_else(|| bad("unknown root"))?;
-                let idx = tree.leaves.iter().position(|l| l[..] == req[32..64]).ok_or_else(|| bad("unknown leaf"))?;
+                let tree = self
+                    .trees
+                    .iter()
+                    .find(|t| t.root()[..] == req[..32])
+                    .ok_or_else(|| bad("unknown root"))?;
+                let idx = tree
+                    .leaves
+                    .iter()
+                    .position(|l| l[..] == req[32..64])
+                    .ok_or_else(|| bad("unknown leaf"))?;
                 let mut out = vec![1u8];
                 out.extend(varint::encode(idx as u64));
                 Ok(out)
@@ -261,6 +279,7 @@ mod tests {
     fn proofs() {
         let leaves: Vec<[u8; 32]> = (0u8..5).map(|i| [i; 32]).collect();
         let t = MerkleTree::new(leaves.clone());
+        #[allow(clippy::needless_range_loop)]
         for i in 0..5 {
             // Recompute the root from each proof.
             let proof = t.proof(i).unwrap();
@@ -280,7 +299,11 @@ mod tests {
             }
             let mut h = leaves[i];
             for (sib, left) in proof.iter().zip(path.iter().rev()) {
-                h = if *left { node_hash(&h, sib) } else { node_hash(sib, &h) };
+                h = if *left {
+                    node_hash(&h, sib)
+                } else {
+                    node_hash(sib, &h)
+                };
             }
             assert_eq!(&h, t.root());
         }

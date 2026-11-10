@@ -1,9 +1,9 @@
 //! JavaScript API (wasm-bindgen) used by the web UI.
 //!
 //! ```js
-//! import init, { LedgerDevice } from "lsdk";
+//! import init, { HwDevice } from "lsdk";
 //! await init();
-//! const dev = await LedgerDevice.request(); // device picker (user gesture)
+//! const dev = await HwDevice.request(); // device picker (user gesture)
 //! console.log(await dev.info());
 //! ```
 
@@ -51,7 +51,8 @@ fn to_js<T: Serialize + ?Sized>(v: &T) -> JsResult<JsValue> {
 }
 
 fn from_js<T: for<'de> Deserialize<'de>>(v: JsValue) -> JsResult<T> {
-    serde_wasm_bindgen::from_value(v).map_err(|e| js_sys::Error::new(&format!("invalid argument: {e}")).into())
+    serde_wasm_bindgen::from_value(v)
+        .map_err(|e| js_sys::Error::new(&format!("invalid argument: {e}")).into())
 }
 
 fn path(s: &str) -> JsResult<DerivationPath> {
@@ -60,10 +61,10 @@ fn path(s: &str) -> JsResult<DerivationPath> {
 
 fn emitter(cb: Option<Function>) -> impl FnMut(HsmEvent) {
     move |ev: HsmEvent| {
-        if let Some(cb) = &cb {
-            if let Ok(v) = to_js(&ev) {
-                let _ = cb.call1(&JsValue::NULL, &v);
-            }
+        if let Some(cb) = &cb
+            && let Ok(v) = to_js(&ev)
+        {
+            let _ = cb.call1(&JsValue::NULL, &v);
         }
     }
 }
@@ -91,7 +92,8 @@ pub fn btc_derive_addresses(
     let x = btc::Xpub::parse(xpub).map_err(js_err)?;
     let mut out = Vec::new();
     for i in start..start + count {
-        let (_, addr, _) = btc::psbt::derive_script(&x, kind, testnet, change, i).map_err(js_err)?;
+        let (_, addr, _) =
+            btc::psbt::derive_script(&x, kind, testnet, change, i).map_err(js_err)?;
         out.push(addr);
     }
     to_js(&out)
@@ -100,20 +102,35 @@ pub fn btc_derive_addresses(
 /// Estimated virtual size of a single-sig transaction.
 #[wasm_bindgen(js_name = btcEstimateVsize)]
 pub fn btc_estimate_vsize(kind: &str, inputs: usize, outputs: usize) -> JsResult<f64> {
-    Ok(btc::psbt::estimate_vsize(btc::AddressType::parse(kind).map_err(js_err)?, inputs, outputs) as f64)
+    Ok(btc::psbt::estimate_vsize(
+        btc::AddressType::parse(kind).map_err(js_err)?,
+        inputs,
+        outputs,
+    ) as f64)
 }
 
 /// Parse a decimal amount into base units (string).
 #[wasm_bindgen(js_name = parseUnits)]
 pub fn parse_units(amount: &str, decimals: u32) -> JsResult<String> {
-    eth::parse_units(amount, decimals).map(|v| v.to_string()).map_err(js_err)
+    eth::parse_units(amount, decimals)
+        .map(|v| v.to_string())
+        .map_err(js_err)
 }
 
 /// Firmware / app catalog lookups that don't need a device.
 #[wasm_bindgen(js_name = catalogFor)]
-pub async fn catalog_for(target_id: u32, version: String, provider: Option<u32>) -> JsResult<JsValue> {
+pub async fn catalog_for(
+    target_id: u32,
+    version: String,
+    provider: Option<u32>,
+) -> JsResult<JsValue> {
     let m = Manager::default();
-    to_js(&m.api.get_apps_by_target(target_id, &version, provider.unwrap_or(1)).await.map_err(js_err)?)
+    to_js(
+        &m.api
+            .get_apps_by_target(target_id, &version, provider.unwrap_or(1))
+            .await
+            .map_err(js_err)?,
+    )
 }
 
 #[derive(Serialize)]
@@ -214,28 +231,28 @@ struct SolTxOut {
 
 /// A device connected over WebHID.
 #[wasm_bindgen]
-pub struct LedgerDevice {
+pub struct HwDevice {
     device: Device<WebHidTransport>,
     manager: RefCell<Manager>,
 }
 
-impl LedgerDevice {
+impl HwDevice {
     fn manager(&self) -> Manager {
         self.manager.borrow().clone()
     }
 }
 
 #[wasm_bindgen]
-impl LedgerDevice {
+impl HwDevice {
     /// Open the browser device picker and connect. Must run in a user gesture.
-    pub async fn request() -> JsResult<LedgerDevice> {
+    pub async fn request() -> JsResult<HwDevice> {
         let t = WebHidTransport::request().await.map_err(js_err)?;
         Ok(Self::from_transport(t))
     }
 
     /// Reconnect to an already authorized device (no picker), e.g. after the
     /// device re-enumerated (app opened / closed, firmware reboot).
-    pub async fn reconnect() -> JsResult<LedgerDevice> {
+    pub async fn reconnect() -> JsResult<HwDevice> {
         let t = WebHidTransport::open_granted().await.map_err(js_err)?;
         Ok(Self::from_transport(t))
     }
@@ -247,7 +264,10 @@ impl LedgerDevice {
     }
 
     fn from_transport(t: WebHidTransport) -> Self {
-        Self { device: Device::new(t), manager: RefCell::new(Manager::default()) }
+        Self {
+            device: Device::new(t),
+            manager: RefCell::new(Manager::default()),
+        }
     }
 
     /// Override the manager API / HSM endpoints.
@@ -268,7 +288,10 @@ impl LedgerDevice {
 
     #[wasm_bindgen(getter)]
     pub fn model(&self) -> Option<String> {
-        self.device.transport().model().map(|m| m.name().to_string())
+        self.device
+            .transport()
+            .model()
+            .map(|m| m.name().to_string())
     }
 
     #[wasm_bindgen(getter)]
@@ -285,13 +308,20 @@ impl LedgerDevice {
         let app = self.device.get_app_and_version().await.ok();
         let on_dashboard = app.as_ref().map(|a| a.is_dashboard()).unwrap_or(true);
         let (version, name) = if on_dashboard {
-            (self.device.get_version().await.ok(), self.device.get_device_name().await.ok())
+            (
+                self.device.get_version().await.ok(),
+                self.device.get_device_name().await.ok(),
+            )
         } else {
             (None, None)
         };
         let t = self.device.transport();
         to_js(&InfoOut {
-            model: version.as_ref().and_then(|v| v.model()).or(t.model()).map(|m| m.name()),
+            model: version
+                .as_ref()
+                .and_then(|v| v.model())
+                .or(t.model())
+                .map(|m| m.name()),
             product_name: t.device().product_name(),
             product_id: t.product_id(),
             app,
@@ -318,7 +348,13 @@ impl LedgerDevice {
     /// Installed apps with catalog metadata (consent required on device).
     #[wasm_bindgen(js_name = listApps)]
     pub async fn list_apps(&self) -> JsResult<JsValue> {
-        to_js(&self.manager().installed_apps(&self.device).await.map_err(js_err)?)
+        to_js(
+            &self
+                .manager()
+                .installed_apps(&self.device)
+                .await
+                .map_err(js_err)?,
+        )
     }
 
     #[wasm_bindgen(js_name = getName)]
@@ -339,12 +375,17 @@ impl LedgerDevice {
     pub async fn apdu(&self, hex_apdu: String) -> JsResult<String> {
         let raw = hex::decode(hex_apdu.replace([' ', '\n'], ""))
             .map_err(|e| js_err(Error::InvalidInput(e.to_string())))?;
-        Ok(hex::encode(self.device.exchange_raw(&raw).await.map_err(js_err)?))
+        Ok(hex::encode(
+            self.device.exchange_raw(&raw).await.map_err(js_err)?,
+        ))
     }
 
     #[wasm_bindgen(js_name = genuineCheck)]
     pub async fn genuine_check(&self, on_event: Option<Function>) -> JsResult<bool> {
-        self.manager().genuine_check(&self.device, &mut emitter(on_event)).await.map_err(js_err)
+        self.manager()
+            .genuine_check(&self.device, &mut emitter(on_event))
+            .await
+            .map_err(js_err)
     }
 
     /// App catalog for this device.
@@ -362,19 +403,29 @@ impl LedgerDevice {
                 let _ = cb.call1(&JsValue::NULL, &v);
             }
         };
-        self.manager().install_app_with_deps(&self.device, &name, &mut cb).await.map_err(js_err)
+        self.manager()
+            .install_app_with_deps(&self.device, &name, &mut cb)
+            .await
+            .map_err(js_err)
     }
 
     #[wasm_bindgen(js_name = uninstallApp)]
     pub async fn uninstall_app(&self, name: String, on_event: Option<Function>) -> JsResult<()> {
-        self.manager().uninstall_app_by_name(&self.device, &name, &mut emitter(on_event)).await.map_err(js_err)
+        self.manager()
+            .uninstall_app_by_name(&self.device, &name, &mut emitter(on_event))
+            .await
+            .map_err(js_err)
     }
 
     /// Firmware update available? Returns the update descriptor or `null`.
     #[wasm_bindgen(js_name = checkFirmware)]
     pub async fn check_firmware(&self) -> JsResult<JsValue> {
         let os = self.device.get_version().await.map_err(js_err)?;
-        let u = self.manager().check_firmware_update(&os).await.map_err(js_err)?;
+        let u = self
+            .manager()
+            .check_firmware_update(&os)
+            .await
+            .map_err(js_err)?;
         to_js(&u)
     }
 
@@ -382,26 +433,47 @@ impl LedgerDevice {
     #[wasm_bindgen(js_name = installOsu)]
     pub async fn install_osu(&self, update: JsValue, on_event: Option<Function>) -> JsResult<()> {
         let u: FirmwareUpdate = from_js(update)?;
-        self.manager().install_osu(&self.device, &u, &mut emitter(on_event)).await.map_err(js_err)
+        self.manager()
+            .install_osu(&self.device, &u, &mut emitter(on_event))
+            .await
+            .map_err(js_err)
     }
 
     /// Flash MCU / bootloader (step 2, bootloader mode only). Returns "mcu" or "bootloader".
     #[wasm_bindgen(js_name = flashMcu)]
-    pub async fn flash_mcu(&self, update: JsValue, on_event: Option<Function>) -> JsResult<JsValue> {
+    pub async fn flash_mcu(
+        &self,
+        update: JsValue,
+        on_event: Option<Function>,
+    ) -> JsResult<JsValue> {
         let u: FirmwareUpdate = from_js(update)?;
-        to_js(&self.manager().flash_mcu(&self.device, &u, &mut emitter(on_event)).await.map_err(js_err)?)
+        to_js(
+            &self
+                .manager()
+                .flash_mcu(&self.device, &u, &mut emitter(on_event))
+                .await
+                .map_err(js_err)?,
+        )
     }
 
     // ---- Ethereum ----
 
     #[wasm_bindgen(js_name = ethConfig)]
     pub async fn eth_config(&self) -> JsResult<JsValue> {
-        to_js(&eth::EthApp::new(&self.device).get_configuration().await.map_err(js_err)?)
+        to_js(
+            &eth::EthApp::new(&self.device)
+                .get_configuration()
+                .await
+                .map_err(js_err)?,
+        )
     }
 
     #[wasm_bindgen(js_name = ethAddress)]
     pub async fn eth_address(&self, path_str: String, display: bool) -> JsResult<JsValue> {
-        let a = eth::EthApp::new(&self.device).get_address(&path(&path_str)?, display, false).await.map_err(js_err)?;
+        let a = eth::EthApp::new(&self.device)
+            .get_address(&path(&path_str)?, display, false)
+            .await
+            .map_err(js_err)?;
         to_js(&a)
     }
 
@@ -411,12 +483,22 @@ impl LedgerDevice {
         let p = path(&path_str)?;
         let input: EthTxIn = from_js(tx)?;
         let app = eth::EthApp::new(&self.device);
-        let from = app.get_address(&p, false, false).await.map_err(js_err)?.address;
+        let from = app
+            .get_address(&p, false, false)
+            .await
+            .map_err(js_err)?
+            .address;
         let mut tx = build_eth_tx(&input).map_err(js_err)?;
-        let unsigned = tx.sign_bytes().map_err(|e| js_err(Error::InvalidInput(format!("{e:?}"))))?;
+        let unsigned = tx
+            .sign_bytes()
+            .map_err(|e| js_err(Error::InvalidInput(format!("{e:?}"))))?;
         let signature = app.sign_tx(&p, &mut tx).await.map_err(js_err)?;
-        let raw = tx.to_bytes().map_err(|e| js_err(Error::App(format!("{e:?}"))))?;
-        let hash = tx.hash().map_err(|e| js_err(Error::App(format!("{e:?}"))))?;
+        let raw = tx
+            .to_bytes()
+            .map_err(|e| js_err(Error::App(format!("{e:?}"))))?;
+        let hash = tx
+            .hash()
+            .map_err(|e| js_err(Error::App(format!("{e:?}"))))?;
         to_js(&EthTxOut {
             unsigned: format!("0x{}", hex::encode(unsigned)),
             raw: format!("0x{}", hex::encode(raw)),
@@ -436,7 +518,12 @@ impl LedgerDevice {
     }
 
     #[wasm_bindgen(js_name = ethSignTypedHashes)]
-    pub async fn eth_sign_typed_hashes(&self, path_str: String, domain: String, message: String) -> JsResult<String> {
+    pub async fn eth_sign_typed_hashes(
+        &self,
+        path_str: String,
+        domain: String,
+        message: String,
+    ) -> JsResult<String> {
         let h = |s: &str| -> JsResult<[u8; 32]> {
             hex::decode(s.trim_start_matches("0x"))
                 .ok()
@@ -454,9 +541,17 @@ impl LedgerDevice {
 
     /// Account key information for a default single-sig account.
     #[wasm_bindgen(js_name = btcAccount)]
-    pub async fn btc_account(&self, kind: String, account: u32, testnet: bool) -> JsResult<JsValue> {
+    pub async fn btc_account(
+        &self,
+        kind: String,
+        account: u32,
+        testnet: bool,
+    ) -> JsResult<JsValue> {
         let kind = btc::AddressType::parse(&kind).map_err(js_err)?;
-        let key = btc::BtcApp::new(&self.device).get_account_key(kind, testnet, account).await.map_err(js_err)?;
+        let key = btc::BtcApp::new(&self.device)
+            .get_account_key(kind, testnet, account)
+            .await
+            .map_err(js_err)?;
         let policy = btc::WalletPolicy::default_single_sig(kind, key.clone());
         to_js(&BtcAccountOut {
             key: key.to_string(),
@@ -470,7 +565,10 @@ impl LedgerDevice {
 
     #[wasm_bindgen(js_name = btcXpub)]
     pub async fn btc_xpub(&self, path_str: String, display: bool) -> JsResult<String> {
-        btc::BtcApp::new(&self.device).get_extended_pubkey(&path(&path_str)?, display).await.map_err(js_err)
+        btc::BtcApp::new(&self.device)
+            .get_extended_pubkey(&path(&path_str)?, display)
+            .await
+            .map_err(js_err)
     }
 
     /// Address from the device, checked against local derivation.
@@ -486,27 +584,49 @@ impl LedgerDevice {
     ) -> JsResult<String> {
         let kind = btc::AddressType::parse(&kind).map_err(js_err)?;
         let app = btc::BtcApp::new(&self.device);
-        let key = app.get_account_key(kind, testnet, account).await.map_err(js_err)?;
-        app.get_wallet_address_checked(kind, testnet, &key, change, index, display).await.map_err(js_err)
+        let key = app
+            .get_account_key(kind, testnet, account)
+            .await
+            .map_err(js_err)?;
+        app.get_wallet_address_checked(kind, testnet, &key, change, index, display)
+            .await
+            .map_err(js_err)
     }
 
     /// Sign a message, returns the base64 signature.
     #[wasm_bindgen(js_name = btcSignMessage)]
     pub async fn btc_sign_message(&self, path_str: String, message: String) -> JsResult<String> {
-        let sig = btc::BtcApp::new(&self.device).sign_message(&path(&path_str)?, message.as_bytes()).await.map_err(js_err)?;
+        let sig = btc::BtcApp::new(&self.device)
+            .sign_message(&path(&path_str)?, message.as_bytes())
+            .await
+            .map_err(js_err)?;
         Ok(outscript::base64::encode(&sig))
     }
 
     /// Sign a PSBT (base64) with a default account. Returns `{signedPsbt, tx?}`.
     #[wasm_bindgen(js_name = btcSignPsbt)]
-    pub async fn btc_sign_psbt(&self, kind: String, account: u32, testnet: bool, psbt_b64: String) -> JsResult<JsValue> {
+    pub async fn btc_sign_psbt(
+        &self,
+        kind: String,
+        account: u32,
+        testnet: bool,
+        psbt_b64: String,
+    ) -> JsResult<JsValue> {
         let kind = btc::AddressType::parse(&kind).map_err(js_err)?;
         let bytes = outscript::psbt::Psbt::decode_base64(psbt_b64.trim())
             .map_err(|e| js_err(Error::InvalidInput(format!("{e:?}"))))?;
         let app = btc::BtcApp::new(&self.device);
-        let policy = app.default_policy(kind, testnet, account).await.map_err(js_err)?;
-        let signed = app.sign_psbt_into(&bytes, &policy, None).await.map_err(js_err)?;
-        let tx = btc::psbt::finalize_and_extract(&signed).ok().map(hex::encode);
+        let policy = app
+            .default_policy(kind, testnet, account)
+            .await
+            .map_err(js_err)?;
+        let signed = app
+            .sign_psbt_into(&bytes, &policy, None)
+            .await
+            .map_err(js_err)?;
+        let tx = btc::psbt::finalize_and_extract(&signed)
+            .ok()
+            .map(hex::encode);
         let out = serde_json::json!({ "signedPsbt": outscript::base64::encode(&signed), "tx": tx });
         to_js(&out)
     }
@@ -517,7 +637,10 @@ impl LedgerDevice {
         let req: BtcSendIn = from_js(request)?;
         let kind = btc::AddressType::parse(&req.kind).map_err(js_err)?;
         let app = btc::BtcApp::new(&self.device);
-        let key = app.get_account_key(kind, req.testnet, req.account).await.map_err(js_err)?;
+        let key = app
+            .get_account_key(kind, req.testnet, req.account)
+            .await
+            .map_err(js_err)?;
         let xpub = btc::Xpub::parse(&key.xpub).map_err(js_err)?;
         let change = match (req.change_index, req.change_amount) {
             (Some(i), Some(a)) if a > 0 => Some((i, a)),
@@ -536,10 +659,15 @@ impl LedgerDevice {
         };
         let unsigned = btc::psbt::build_psbt(&spend).map_err(js_err)?;
         let policy = btc::WalletPolicy::default_single_sig(kind, key);
-        let signatures = app.sign_psbt(&unsigned, &policy, None).await.map_err(js_err)?;
+        let signatures = app
+            .sign_psbt(&unsigned, &policy, None)
+            .await
+            .map_err(js_err)?;
         let signed = btc::psbt::insert_signatures(&unsigned, &signatures).map_err(js_err)?;
         let tx = btc::psbt::finalize_and_extract(&signed).map_err(js_err)?;
-        let txid = outscript::btctx::BtcTx::from_bytes(&tx).map(|t| hex::encode(t.hash())).unwrap_or_default();
+        let txid = outscript::btctx::BtcTx::from_bytes(&tx)
+            .map(|t| hex::encode(t.hash()))
+            .unwrap_or_default();
         to_js(&BtcSendOut {
             unsigned_psbt: outscript::base64::encode(&unsigned),
             signed_psbt: outscript::base64::encode(&signed),
@@ -553,17 +681,31 @@ impl LedgerDevice {
 
     #[wasm_bindgen(js_name = solConfig)]
     pub async fn sol_config(&self) -> JsResult<JsValue> {
-        to_js(&sol::SolApp::new(&self.device).get_configuration().await.map_err(js_err)?)
+        to_js(
+            &sol::SolApp::new(&self.device)
+                .get_configuration()
+                .await
+                .map_err(js_err)?,
+        )
     }
 
     #[wasm_bindgen(js_name = solAddress)]
     pub async fn sol_address(&self, path_str: String, display: bool) -> JsResult<String> {
-        sol::SolApp::new(&self.device).get_address(&path(&path_str)?, display).await.map_err(js_err)
+        sol::SolApp::new(&self.device)
+            .get_address(&path(&path_str)?, display)
+            .await
+            .map_err(js_err)
     }
 
     /// Build (with outscript) and sign a SOL transfer. `amount` in SOL.
     #[wasm_bindgen(js_name = solTransfer)]
-    pub async fn sol_transfer(&self, path_str: String, to: String, amount: String, blockhash: String) -> JsResult<JsValue> {
+    pub async fn sol_transfer(
+        &self,
+        path_str: String,
+        to: String,
+        amount: String,
+        blockhash: String,
+    ) -> JsResult<JsValue> {
         let p = path(&path_str)?;
         let app = sol::SolApp::new(&self.device);
         let from = app.get_address(&p, false).await.map_err(js_err)?;
@@ -573,7 +715,9 @@ impl LedgerDevice {
             .map_err(|_| js_err(Error::InvalidInput("amount too large".into())))?;
         let mut tx = sol::build_transfer(&from, &to, lamports, &blockhash).map_err(js_err)?;
         let sig = app.sign_tx(&p, &mut tx).await.map_err(js_err)?;
-        let raw = tx.to_bytes().map_err(|e| js_err(Error::App(format!("{e:?}"))))?;
+        let raw = tx
+            .to_bytes()
+            .map_err(|e| js_err(Error::App(format!("{e:?}"))))?;
         to_js(&SolTxOut {
             from,
             base64: outscript::base64::encode(&raw),
@@ -584,18 +728,31 @@ impl LedgerDevice {
 }
 
 fn build_eth_tx(i: &EthTxIn) -> Result<eth::EvmTx> {
-    let mut tx = eth::EvmTx { chain_id: i.chain_id, nonce: i.nonce, gas: i.gas, ..Default::default() };
-    let value = i.value.as_deref().filter(|v| !v.trim().is_empty()).unwrap_or("0");
+    let mut tx = eth::EvmTx {
+        chain_id: i.chain_id,
+        nonce: i.nonce,
+        gas: i.gas,
+        ..Default::default()
+    };
+    let value = i
+        .value
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("0");
     match i.token.as_deref().filter(|t| !t.is_empty()) {
         Some(token) => {
             tx.to = token.to_string();
-            tx.data = eth::erc20_transfer_data(&i.to, &eth::parse_units(value, i.decimals.unwrap_or(18))?)?;
+            tx.data = eth::erc20_transfer_data(
+                &i.to,
+                &eth::parse_units(value, i.decimals.unwrap_or(18))?,
+            )?;
         }
         None => {
             tx.to = i.to.clone();
             tx.value = eth::parse_units(value, 18)?;
             if let Some(d) = i.data.as_deref().filter(|d| !d.is_empty() && *d != "0x") {
-                tx.data = hex::decode(d.trim_start_matches("0x")).map_err(|e| Error::InvalidInput(e.to_string()))?;
+                tx.data = hex::decode(d.trim_start_matches("0x"))
+                    .map_err(|e| Error::InvalidInput(e.to_string()))?;
             }
         }
     }
@@ -608,11 +765,9 @@ fn build_eth_tx(i: &EthTxIn) -> Result<eth::EvmTx> {
         None => {
             tx.tx_type = eth::EvmTxType::Eip1559;
             tx.gas_tip_cap = gwei(i.priority_fee.as_deref().unwrap_or("1"))?;
-            tx.gas_fee_cap = gwei(
-                i.max_fee
-                    .as_deref()
-                    .ok_or_else(|| Error::InvalidInput("maxFee (gwei) or gasPrice is required".into()))?,
-            )?;
+            tx.gas_fee_cap = gwei(i.max_fee.as_deref().ok_or_else(|| {
+                Error::InvalidInput("maxFee (gwei) or gasPrice is required".into())
+            })?)?;
         }
     }
     Ok(tx)
