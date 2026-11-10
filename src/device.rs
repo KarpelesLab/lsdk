@@ -136,9 +136,10 @@ impl<T: Transport> Device<T> {
     fn screen_saver_err(sw: StatusWord) -> Error {
         match sw {
             sw if sw.is_refused() => Error::UserRefused,
-            // The dashboard answers "unknown instruction" outside recovery mode.
+            // The dashboard answers 0x6d02 outside recovery mode and for a
+            // malformed request (verified on a Nano S Plus).
             StatusWord(0x6d00..=0x6dff) => Error::App(
-                "the screensaver can only be changed in recovery mode (Nano X / Nano S Plus)"
+                "screensaver command rejected: only accepted in recovery mode (Nano X / Nano S Plus), with a valid request"
                     .into(),
             ),
             sw => sw.into(),
