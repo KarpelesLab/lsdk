@@ -96,6 +96,15 @@ impl RootKey {
         self.0.public_key().to_sec1()
     }
 
+    /// DER ECDSA signature of a 32-byte digest (no extra hashing).
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>> {
+        let sig = self
+            .0
+            .sign_prehash::<Sha256>(digest)
+            .map_err(|e| Error::App(format!("sign: {e:?}")))?;
+        Ok(der_encode(&sig))
+    }
+
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
         let sig = self
             .0

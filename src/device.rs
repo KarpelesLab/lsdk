@@ -237,6 +237,57 @@ impl<T: Transport> Device<T> {
         Ok(out)
     }
 
+    /// Replay an APDU script (one hex APDU per line, `#` comments allowed),
+    /// e.g. a signed language pack. Stops at the first non-`9000` status.
+    /// `on_progress(done, total)` counts APDUs.
+    pub async fn run_apdu_script(
+        &self,
+        script: &str,
+        on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<()> {
+        let apdus: Vec<Vec<u8>> = script
+            .lines()
+            .map(|l| l.split('#').next().unwrap_or_default().trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| hex::decode(l.replace(' ', "")))
+            .collect::<core::result::Result<_, _>>()
+            .map_err(|e| Error::InvalidInput(format!("APDU script: {e}")))?;
+        if apdus.is_empty() {
+            return Err(Error::InvalidInput("empty APDU script".into()));
+        }
+        let total = apdus.len();
+        for (i, apdu) in apdus.iter().enumerate() {
+            let r = crate::apdu::Response::from_raw(self.exchange_raw(apdu).await?)?;
+            match r.sw.0 {
+                0x9000 => {}
+                0x6985 | 0x5501 => return Err(Error::UserRefused),
+                0x6a84 | 0x5102 => return Err(Error::App("not enough space on the device".into())),
+                _ => {
+                    return Err(Error::App(format!(
+                        "APDU {} of {total} failed: {}",
+                        i + 1,
+                        r.sw
+                    )));
+                }
+            }
+            on_progress(i + 1, total);
+        }
+        Ok(())
+    }
+
+    /// Install a language pack from its signed APDU script, replacing the
+    /// installed packs (one at a time is supported).
+    pub async fn install_language_script(
+        &self,
+        script: &str,
+        on_progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<()> {
+        for installed in self.list_language_packs().await? {
+            self.delete_language_pack(installed.id as u8).await?;
+        }
+        self.run_apdu_script(script, on_progress).await
+    }
+
     /// Remove a language pack (the device may ask for confirmation).
     pub async fn delete_language_pack(&self, language: u8) -> Result<()> {
         self.check(self.exchange(&os::delete_language_pack(language)).await?)

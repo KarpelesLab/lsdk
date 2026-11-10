@@ -35,6 +35,21 @@ const installLang = () => guard(async () => {
   installed.value = await run('list language packs', (d) => d.listLanguagePacks())
 })
 
+async function installFile(e) {
+  const f = e.target.files?.[0]
+  if (!f) return
+  const script = await f.text()
+  e.target.value = ''
+  await guard(async () => {
+    await run(`install ${f.name}`, (d) => {
+      state.prompt = 'Confirm the language change on the device if asked'
+      return d.installLanguageScript(script, (i, n) => { state.progress = i / n })
+    })
+    log('ok', `${f.name} installed`)
+    installed.value = await run('list language packs', (d) => d.listLanguagePacks())
+  })
+}
+
 const removeLangs = () => guard(async () => {
   await run('remove language packs', (d) => d.removeLanguagePacks())
   installed.value = []
@@ -71,6 +86,7 @@ const reset = () => guard(async () => {
         <button class="primary" :disabled="!!state.busy || !choice" @click="installLang">Install</button>
         <button :disabled="!!state.busy" @click="removeLangs">Back to English</button>
       </template>
+      <label class="check" style="cursor:pointer" title="signed .apdu script of an official pack"><input type="file" accept=".apdu,.txt" style="display:none" :disabled="!!state.busy || !onDashboard" @change="installFile" /><span class="badge">From file…</span></label>
     </div>
     <p v-if="installed" class="small-text">
       Installed: <span v-if="!installed.length" class="muted">none (English)</span>

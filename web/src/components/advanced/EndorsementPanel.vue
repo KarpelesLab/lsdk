@@ -22,6 +22,20 @@ const read = (n) => guard(async () => {
   }
 })
 
+// Reset needs the secure channel: the CA key (if remembered) avoids the
+// unknown-manager prompt.
+const reset = () => guard(async () => {
+  if (!confirm('Erase the endorsement keys of both slots?')) return
+  let key = null
+  try { key = localStorage.getItem('lsdk.caKey') } catch { /* none */ }
+  await run('reset endorsement', (d) => d.secure('resetEndorsement', key, null, (ev) => {
+    if (ev.type === 'permissionRequested') { state.prompt = 'Allow the manager, then confirm on the device'; state.promptDetail = ev.hostPublicKey }
+    if (ev.type === 'permissionGranted') { state.prompt = null; state.promptDetail = null }
+  }))
+  info.value = {}
+  log('ok', 'endorsement reset')
+})
+
 const setup = () => guard(async () => {
   rootPublicKey(ownerKey.value.trim()) // validates
   if (!confirm(`Create the endorsement key of slot ${slot.value}? A slot can only be set once until the device is reset.`)) return
@@ -60,7 +74,11 @@ const setup = () => guard(async () => {
         <div><label>Slot</label><select v-model.number="slot"><option :value="1">1</option><option :value="2">2</option></select></div>
         <div style="grid-column: span 2"><label>Owner private key (hex)</label><input v-model="ownerKey" type="password" class="mono" autocomplete="off" /></div>
       </div>
-      <div class="row" style="margin-top:10px"><button class="primary" :disabled="!!state.busy || !ownerKey" @click="setup">Create &amp; certify</button></div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" :disabled="!!state.busy || !ownerKey" @click="setup">Create &amp; certify</button>
+        <div class="spacer"></div>
+        <button class="danger" :disabled="!!state.busy" @click="reset">Reset endorsement</button>
+      </div>
       <dl v-if="result" class="kv" style="margin-top:10px">
         <dt>Public key</dt><dd>{{ result.publicKey }}</dd>
         <dt>Certificate</dt><dd>{{ result.certificate }}</dd>

@@ -19,6 +19,12 @@ fn main() {
                 println!("area 0x{:08x} len {}", a.address, a.data.len());
             }
             println!("code length {:?}", img.code_length());
+            if let Some(t) = img.target_id {
+                println!(
+                    "app hash {}",
+                    hex::encode(img.app_hash(t).unwrap_or_default())
+                );
+            }
             println!(
                 "create_app params {}",
                 hex::encode(img.create_app_params().unwrap_or_default())

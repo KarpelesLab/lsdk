@@ -665,6 +665,42 @@ impl HwDevice {
             .map_err(js_err)
     }
 
+    /// Install a language pack from a signed APDU script (file contents).
+    #[wasm_bindgen(js_name = installLanguageScript)]
+    pub async fn install_language_script(
+        &self,
+        script: String,
+        on_progress: Option<Function>,
+    ) -> JsResult<()> {
+        let mut cb = |i: usize, n: usize| {
+            if let Some(f) = &on_progress {
+                let _ = f.call2(&JsValue::NULL, &(i as u32).into(), &(n as u32).into());
+            }
+        };
+        self.device
+            .install_language_script(&script, &mut cb)
+            .await
+            .map_err(js_err)
+    }
+
+    /// Replay an APDU script (one hex APDU per line).
+    #[wasm_bindgen(js_name = runApduScript)]
+    pub async fn run_apdu_script(
+        &self,
+        script: String,
+        on_progress: Option<Function>,
+    ) -> JsResult<()> {
+        let mut cb = |i: usize, n: usize| {
+            if let Some(f) = &on_progress {
+                let _ = f.call2(&JsValue::NULL, &(i as u32).into(), &(n as u32).into());
+            }
+        };
+        self.device
+            .run_apdu_script(&script, &mut cb)
+            .await
+            .map_err(js_err)
+    }
+
     /// Remove every language pack (back to English).
     #[wasm_bindgen(js_name = removeLanguagePacks)]
     pub async fn remove_language_packs(&self) -> JsResult<()> {
@@ -844,6 +880,7 @@ impl HwDevice {
         ca_key: String,
         replace: bool,
         on_event: Option<Function>,
+        sign: Option<bool>,
     ) -> JsResult<()> {
         let img = crate::loader::AppImage::from_elf(&elf).map_err(js_err)?;
         let root = crate::scp::RootKey::from_hex(&ca_key).map_err(js_err)?;
@@ -859,7 +896,13 @@ impl HwDevice {
                 }
             }
         };
-        crate::loader::install_app(&mut chan, &img, replace, &mut progress)
+        let signer = if sign.unwrap_or(false) {
+            Some(&root)
+        } else {
+            None
+        };
+        let opts = crate::loader::InstallOptions { replace, signer };
+        crate::loader::install_app_with(&mut chan, &img, &opts, &mut progress)
             .await
             .map_err(js_err)
     }

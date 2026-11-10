@@ -531,33 +531,7 @@ impl Manager {
     ) -> Result<()> {
         self.ensure_dashboard(device).await?;
         let script = self.api.fetch_text(&pack.apdu_install_url).await?;
-        let apdus: Vec<Vec<u8>> = script
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(hex::decode)
-            .collect::<core::result::Result<_, _>>()
-            .map_err(|e| Error::InvalidResponse(format!("language pack script: {e}")))?;
-        if apdus.is_empty() {
-            return Err(Error::InvalidResponse("empty language pack script".into()));
-        }
-        for installed in device.list_language_packs().await? {
-            device.delete_language_pack(installed.id as u8).await?;
-        }
-        let total = apdus.len();
-        for (i, apdu) in apdus.iter().enumerate() {
-            let r = crate::apdu::Response::from_raw(device.exchange_raw(apdu).await?)?;
-            match r.sw.0 {
-                0x9000 => {}
-                0x6985 | 0x5501 => return Err(Error::UserRefused),
-                0x6a84 | 0x5102 => {
-                    return Err(Error::App("not enough space for the language pack".into()));
-                }
-                _ => return Err(r.sw.into()),
-            }
-            on_progress(i + 1, total);
-        }
-        Ok(())
+        device.install_language_script(&script, on_progress).await
     }
 
     /// Remove every language pack (back to English).

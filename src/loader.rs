@@ -297,6 +297,28 @@ impl AppImage {
     }
 }
 
+impl AppImage {
+    /// The image as loaded: `min_address..end`, gaps zero-filled.
+    pub fn flat_image(&self) -> Vec<u8> {
+        let min = self.min_address();
+        let mut out = vec![0u8; self.image_size() as usize];
+        for a in &self.areas {
+            let o = (a.address - min) as usize;
+            out[o..o + a.data.len()].copy_from_slice(&a.data);
+        }
+        out
+    }
+
+    /// Application hash, as computed by the device and reported by app
+    /// listings: `sha256(target_id || CREATE_APP params || image)`.
+    pub fn app_hash(&self, target_id: u32) -> Result<[u8; 32]> {
+        let mut d = target_id.to_be_bytes().to_vec();
+        d.extend(self.create_app_params()?);
+        d.extend(self.flat_image());
+        Ok(purecrypto::hash::sha256(&d))
+    }
+}
+
 /// CRC-16/CCITT-FALSE, as checked by `SECUREINS_CRC`.
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0xffff;
@@ -318,7 +340,16 @@ const LOAD_CHUNK: usize = 208;
 /// The `LOAD` offset is 16 bits: segments are sent in 64 KiB windows.
 const WINDOW: usize = 0x10000;
 
-/// Install an app. `replace` deletes an app with the same name first.
+/// Install options.
+#[derive(Default)]
+pub struct InstallOptions<'a> {
+    /// Delete an app with the same name first.
+    pub replace: bool,
+    /// Sign the app hash with this key (sent with `COMMIT`).
+    pub signer: Option<&'a crate::scp::RootKey>,
+}
+
+/// Install an app. See [`install_app_with`] for signing.
 /// `on_progress(sent, total)` reports loaded bytes.
 pub async fn install_app<T: Transport>(
     chan: &mut SecureChannel<'_, T>,
@@ -326,6 +357,26 @@ pub async fn install_app<T: Transport>(
     replace: bool,
     on_progress: &mut dyn FnMut(usize, usize),
 ) -> Result<()> {
+    install_app_with(
+        chan,
+        image,
+        &InstallOptions {
+            replace,
+            signer: None,
+        },
+        on_progress,
+    )
+    .await
+}
+
+/// Install an app with options (replace, signature).
+pub async fn install_app_with<T: Transport>(
+    chan: &mut SecureChannel<'_, T>,
+    image: &AppImage,
+    opts: &InstallOptions<'_>,
+    on_progress: &mut dyn FnMut(usize, usize),
+) -> Result<()> {
+    let replace = opts.replace;
     if let Some(t) = image.target_id
         && t != chan.version.target_id
     {
@@ -364,7 +415,16 @@ pub async fn install_app<T: Transport>(
             chan.exchange(ins::CRC, &crc).await?;
         }
     }
-    chan.exchange(ins::COMMIT, &[]).await?;
+    let commit = match opts.signer {
+        Some(key) => {
+            let sig = key.sign_digest(&image.app_hash(chan.version.target_id)?)?;
+            let mut d = vec![sig.len() as u8];
+            d.extend(sig);
+            d
+        }
+        None => Vec::new(),
+    };
+    chan.exchange(ins::COMMIT, &commit).await?;
     Ok(())
 }
 

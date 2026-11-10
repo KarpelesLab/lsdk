@@ -15,6 +15,7 @@ const caName = ref('lsdk dev')
 const useRecover = ref(false)
 const elf = ref(null) // { name, bytes, info }
 const replace = ref(true)
+const signApp = ref(false)
 const loading = ref(null)
 const mem = ref(null)
 const apps = ref(null)
@@ -112,7 +113,7 @@ const targetMismatch = computed(() => elf.value?.info?.targetId && deviceTarget.
 
 const sideload = () => guard(async () => {
   loading.value = null
-  await run(`sideload ${elf.value.info.name}`, (d) => d.sideload(elf.value.bytes, caKey.value.trim(), replace.value, scpEvent))
+  await run(`sideload ${elf.value.info.name}`, (d) => d.sideload(elf.value.bytes, caKey.value.trim(), replace.value, scpEvent, signApp.value))
   log('ok', `${elf.value.info.name} installed`)
   loading.value = null
 })
@@ -189,6 +190,7 @@ const delAll = () => guard(async () => {
       </dl>
       <div class="row" style="margin-top:10px">
         <label class="check"><input v-model="replace" type="checkbox" /> replace an app with the same name</label>
+        <label class="check"><input v-model="signApp" type="checkbox" /> sign the app hash with the CA key</label>
         <div class="spacer"></div>
         <button class="primary" :disabled="!!state.busy || !elf || !caPublic || targetMismatch" @click="sideload">Install</button>
       </div>

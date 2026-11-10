@@ -167,6 +167,8 @@ enum LangCmd {
     Install { language: String },
     /// Remove the installed packs (back to English).
     Remove,
+    /// Install a pack from its signed APDU script file.
+    InstallFile { file: std::path::PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -182,6 +184,11 @@ enum EndorseCmd {
         /// Use this DER certificate (hex) instead of signing with the owner key.
         #[arg(long)]
         certificate: Option<String>,
+    },
+    /// Erase the endorsement keys (secure channel, confirmed on device).
+    Reset {
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
     },
 }
 
@@ -259,6 +266,12 @@ enum AppCmd {
         /// Only print what would be installed.
         #[arg(long)]
         dry_run: bool,
+        /// Sign the app hash with the CA key (or --sign-key) at commit.
+        #[arg(long)]
+        sign: bool,
+        /// Key file to sign the app with (implies --sign).
+        #[arg(long)]
+        sign_key: Option<std::path::PathBuf>,
         /// HEX input: app name.
         #[arg(long)]
         name: Option<String>,
@@ -678,6 +691,19 @@ async fn run(cli: Cli) -> Result<()> {
                         .await?;
                     println!("{} {} installed", pack.language, pack.version);
                 }
+                LangCmd::InstallFile { file } => {
+                    let script = std::fs::read_to_string(file)
+                        .map_err(|e| Error::InvalidInput(format!("{}: {e}", file.display())))?;
+                    eprintln!("> confirm on the device if asked");
+                    d.install_language_script(&script, &mut |i, n| {
+                        eprint!("\r> {i}/{n}");
+                        if i == n {
+                            eprintln!();
+                        }
+                    })
+                    .await?;
+                    println!("language pack installed");
+                }
                 LangCmd::Remove => {
                     manager.remove_language_packs(&d).await?;
                     println!("language packs removed");
@@ -693,6 +719,14 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let d = open(&cli)?;
             match cmd {
+                EndorseCmd::Reset { key } => {
+                    let root = root_key(key.as_ref())?;
+                    let mut chan =
+                        lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                    eprintln!("> confirm on the device");
+                    chan.reset_endorsement().await?;
+                    println!("endorsement reset");
+                }
                 EndorseCmd::Info { slot: n } => print(&d.endorsement_info(slot(*n)?).await?),
                 EndorseCmd::Setup {
                     slot: n,
@@ -874,6 +908,8 @@ async fn run(cli: Cli) -> Result<()> {
                 key,
                 no_replace,
                 dry_run,
+                sign,
+                sign_key,
                 name,
                 flags,
                 api_level,
@@ -916,6 +952,9 @@ async fn run(cli: Cli) -> Result<()> {
                 );
                 if *dry_run {
                     println!("create_app {}", hex::encode(img.create_app_params()?));
+                    if let Some(t) = img.target_id {
+                        println!("app hash {}", hex::encode(img.app_hash(t)?));
+                    }
                     return Ok(());
                 }
                 let root = read_key(&key.clone().unwrap_or_else(default_ca_path)).map_err(|e| {
@@ -925,7 +964,16 @@ async fn run(cli: Cli) -> Result<()> {
                 })?;
                 let d = open(&cli)?;
                 let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
-                lsdk::loader::install_app(&mut chan, &img, !no_replace, &mut |sent, total| {
+                let signer = match (sign_key, sign) {
+                    (Some(p), _) => Some(read_key(p)?),
+                    (None, true) => Some(root.clone()),
+                    (None, false) => None,
+                };
+                let opts = lsdk::loader::InstallOptions {
+                    replace: !no_replace,
+                    signer: signer.as_ref(),
+                };
+                lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
                     eprint!("\r> loading {sent}/{total}");
                     if sent == total {
                         eprintln!();
