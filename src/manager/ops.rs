@@ -14,6 +14,11 @@ use crate::manager::api::{
 use crate::os::{InstalledApp, OsVersion};
 use crate::transport::Transport;
 
+/// Statuses returned when installing an app that is already installed.
+fn is_already_installed(sw: crate::apdu::StatusWord) -> bool {
+    matches!(sw.0, 0x6a80 | 0x6a81 | 0x6a8e | 0x6a8f)
+}
+
 /// Expected HSM result for a genuine device.
 pub const GENUINE_RESULT: &str = "0000";
 
@@ -233,11 +238,18 @@ impl Manager {
         }
     }
 
-    /// Install an app by name, installing its parent first when missing.
+    /// Install an app by name, with its parent app (e.g. Ethereum for its
+    /// plugins) when needed.
+    ///
+    /// `installed`: names of the apps known to be installed (from a previous
+    /// [`Device::list_apps`]); listing apps requires the user's approval, so
+    /// this method never lists them itself. With `None`, the parent is
+    /// installed unconditionally and "already installed" is not an error.
     pub async fn install_app_with_deps<T: Transport>(
         &self,
         device: &Device<T>,
         name: &str,
+        installed: Option<&[String]>,
         on_event: &mut dyn FnMut(&str, HsmEvent),
     ) -> Result<()> {
         self.ensure_dashboard(device).await?;
@@ -253,22 +265,24 @@ impl Manager {
                 })
         };
         let app = find(name)?;
-        let installed = device.list_apps().await?;
-        let mut plan = Vec::new();
-        if let Some(parent) = app.parent_name.as_deref()
-            && !installed
-                .iter()
-                .any(|a| a.name.eq_ignore_ascii_case(parent))
-        {
-            plan.push(find(parent)?);
+        if let Some(parent) = app.parent_name.as_deref() {
+            let known = installed.map(|list| list.iter().any(|a| a.eq_ignore_ascii_case(parent)));
+            if known != Some(true) {
+                let parent_app = find(parent)?;
+                let label = parent_app.version_name.clone();
+                match self
+                    .install_app(device, &os, &parent_app, &mut |ev| on_event(&label, ev))
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(Error::Status(sw)) if known.is_none() && is_already_installed(sw) => {}
+                    Err(e) => return Err(e),
+                }
+            }
         }
-        plan.push(app);
-        for app in &plan {
-            let label = app.version_name.clone();
-            self.install_app(device, &os, app, &mut |ev| on_event(&label, ev))
-                .await?;
-        }
-        Ok(())
+        let label = app.version_name.clone();
+        self.install_app(device, &os, &app, &mut |ev| on_event(&label, ev))
+            .await
     }
 
     /// Uninstall one app.
@@ -302,7 +316,8 @@ impl Manager {
         }
     }
 
-    /// Uninstall an installed app by name.
+    /// Uninstall an app by name. Uses the catalog entry of that name (no app
+    /// listing, which would require the user's approval).
     pub async fn uninstall_app_by_name<T: Transport>(
         &self,
         device: &Device<T>,
@@ -311,21 +326,12 @@ impl Manager {
     ) -> Result<()> {
         self.ensure_dashboard(device).await?;
         let os = device.get_version().await?;
-        let installed = self.installed_apps(device).await?;
-        let entry = installed
+        let app = self
+            .catalog(&os)
+            .await?
             .into_iter()
-            .find(|a| a.installed.name.eq_ignore_ascii_case(name))
-            .ok_or_else(|| Error::NotFound(format!("app {name:?} is not installed")))?;
-        let app = match entry.catalog {
-            Some(app) => app,
-            // Not resolvable by hash (outdated version): use the current catalog entry.
-            None => self
-                .catalog(&os)
-                .await?
-                .into_iter()
-                .find(|a| a.version_name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| Error::NotFound(format!("no catalog entry for {name:?}")))?,
-        };
+            .find(|a| a.version_name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Error::NotFound(format!("no catalog entry for {name:?}")))?;
         self.uninstall_app(device, &os, &app, on_event).await
     }
 

@@ -376,7 +376,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Install { name } => {
             manager
-                .install_app_with_deps(&open(&cli)?, name, &mut |app, ev| {
+                .install_app_with_deps(&open(&cli)?, name, None, &mut |app, ev| {
                     if matches!(ev, HsmEvent::Opened) {
                         eprintln!("installing {app}");
                     }

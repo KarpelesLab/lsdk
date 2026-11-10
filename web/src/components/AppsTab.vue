@@ -47,28 +47,56 @@ const loadCatalog = () => guard(async () => {
   catalog.value = await run('load catalog', (d) => d.catalog())
 })
 
-const install = (name) => guard(async () => {
+// Listing apps requires an approval on the device, so after installs and
+// uninstalls the list is updated locally instead of being listed again.
+const catalogEntry = (name) => (catalog.value || []).find((c) => c.versionName.toLowerCase() === name.toLowerCase())
+const installedNames = () => (installed.value ? installed.value.map((a) => a.installed.name) : undefined)
+
+function markInstalled(name) {
+  if (!installed.value) return
+  const app = catalogEntry(name)
+  installed.value = installed.value.filter((a) => a.installed.name.toLowerCase() !== name.toLowerCase())
+  installed.value.push({
+    installed: { name: app?.versionName ?? name, hash: app?.hash ?? '', hashCodeData: '', blocks: 0, flags: 0 },
+    catalog: app ?? null,
+  })
+  installed.value.sort((x, y) => x.installed.name.localeCompare(y.installed.name))
+}
+
+function markUninstalled(name) {
+  if (installed.value) installed.value = installed.value.filter((a) => a.installed.name.toLowerCase() !== name.toLowerCase())
+}
+
+async function doInstall(name) {
+  const done = new Set()
   await run(`install ${name}`, (d) => d.installApp(name, (ev) => {
     if (ev.type === 'opened') log('info', `installing ${ev.app}`)
+    if (ev.type === 'progress' && ev.index === ev.total) done.add(ev.app)
     hsmEvent(ev)
-  }))
+  }, installedNames()))
+  // The parent app may have been installed along the way.
+  for (const app of done) markInstalled(app)
+  markInstalled(name)
+}
+
+const install = (name) => guard(async () => {
+  await doInstall(name)
   log('ok', `${name} installed`)
-  await loadInstalled()
 })
 
 // Updating = uninstall the old version, then install the new one.
 const update = (name) => guard(async () => {
   await run(`uninstall ${name}`, (d) => d.uninstallApp(name, hsmEvent))
-  await run(`install ${name}`, (d) => d.installApp(name, hsmEvent))
+  markUninstalled(name)
+  await doInstall(name)
   log('ok', `${name} updated`)
-  await loadInstalled()
 })
 
 const uninstall = (name) => guard(async () => {
   if (!confirm(`Uninstall ${name}? Your funds are not affected (they live on the blockchain), you can reinstall it any time.`)) return
   await run(`uninstall ${name}`, (d) => d.uninstallApp(name, hsmEvent))
+  markUninstalled(name)
   log('ok', `${name} uninstalled`)
-  await loadInstalled()
 })
 
 const loadAll = async () => {

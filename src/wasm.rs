@@ -428,9 +428,16 @@ impl HwDevice {
         to_js(&self.manager().catalog(&os).await.map_err(js_err)?)
     }
 
-    /// Install an app by name (and its parent if missing). Events: `{app, event}`.
+    /// Install an app by name (and its parent if missing). Events: `{app, ...}`.
+    /// `installed`: names of the installed apps if already known (avoids a
+    /// second listing approval on the device).
     #[wasm_bindgen(js_name = installApp)]
-    pub async fn install_app(&self, name: String, on_event: Option<Function>) -> JsResult<()> {
+    pub async fn install_app(
+        &self,
+        name: String,
+        on_event: Option<Function>,
+        installed: Option<Vec<String>>,
+    ) -> JsResult<()> {
         let mut cb = |app: &str, ev: HsmEvent| {
             if let (Some(cb), Ok(v)) = (&on_event, to_js(&ev)) {
                 let _ = js_sys::Reflect::set(&v, &"app".into(), &app.into());
@@ -438,7 +445,7 @@ impl HwDevice {
             }
         };
         self.manager()
-            .install_app_with_deps(&self.device, &name, &mut cb)
+            .install_app_with_deps(&self.device, &name, installed.as_deref(), &mut cb)
             .await
             .map_err(js_err)
     }
