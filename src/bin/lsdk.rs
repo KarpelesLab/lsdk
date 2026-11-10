@@ -408,12 +408,10 @@ async fn run(cli: Cli) -> Result<()> {
                     token,
                     decimals,
                 } => {
-                    let mut tx = eth::EvmTx {
-                        chain_id: *chain_id,
-                        nonce: *nonce,
-                        gas: *gas,
-                        ..Default::default()
-                    };
+                    let mut tx = eth::EvmTx::default();
+                    tx.chain_id = *chain_id;
+                    tx.nonce = *nonce;
+                    tx.gas = *gas;
                     match token {
                         Some(token) => {
                             tx.to = token.clone();

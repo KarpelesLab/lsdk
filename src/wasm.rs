@@ -728,12 +728,10 @@ impl HwDevice {
 }
 
 fn build_eth_tx(i: &EthTxIn) -> Result<eth::EvmTx> {
-    let mut tx = eth::EvmTx {
-        chain_id: i.chain_id,
-        nonce: i.nonce,
-        gas: i.gas,
-        ..Default::default()
-    };
+    let mut tx = eth::EvmTx::default();
+    tx.chain_id = i.chain_id;
+    tx.nonce = i.nonce;
+    tx.gas = i.gas;
     let value = i
         .value
         .as_deref()

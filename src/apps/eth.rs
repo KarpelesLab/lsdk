@@ -444,15 +444,13 @@ mod tests {
             (EvmTxType::Legacy, 1),
             (EvmTxType::Eip1559, 8453),
         ] {
-            let tx = EvmTx {
-                tx_type: ty,
-                chain_id: cid,
-                nonce: 1,
-                gas: 21000,
-                gas_fee_cap: BigInt::from(1),
-                to: "0x0000000000000000000000000000000000000001".into(),
-                ..Default::default()
-            };
+            let mut tx = EvmTx::default();
+            tx.tx_type = ty;
+            tx.chain_id = cid;
+            tx.nonce = 1;
+            tx.gas = 21000;
+            tx.gas_fee_cap = BigInt::from(1);
+            tx.to = "0x0000000000000000000000000000000000000001".into();
             let b = tx.sign_bytes().unwrap();
             assert_eq!(
                 unsigned_tx_info(&b).unwrap(),
@@ -463,16 +461,14 @@ mod tests {
 
     #[test]
     fn assemble_matches_evmtx() {
-        let mut tx = EvmTx {
-            tx_type: EvmTxType::Legacy,
-            chain_id: 137,
-            nonce: 3,
-            gas: 21000,
-            gas_fee_cap: BigInt::from(30_000_000_000u64),
-            to: "0x0000000000000000000000000000000000000001".into(),
-            value: BigInt::from(5),
-            ..Default::default()
-        };
+        let mut tx = EvmTx::default();
+        tx.tx_type = EvmTxType::Legacy;
+        tx.chain_id = 137;
+        tx.nonce = 3;
+        tx.gas = 21000;
+        tx.gas_fee_cap = BigInt::from(30_000_000_000u64);
+        tx.to = "0x0000000000000000000000000000000000000001".into();
+        tx.value = BigInt::from(5);
         let unsigned = tx.sign_bytes().unwrap();
         let sig = EthSignature {
             v: 310,
