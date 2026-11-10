@@ -1,7 +1,7 @@
 [package]
 name = "lsdk"
 description = "Rust SDK for hardware wallets speaking the BOLOS APDU protocol: HID/WebHID transport, device info, genuine check, app management, firmware updates and app signers"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
