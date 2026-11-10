@@ -34,7 +34,7 @@ jobs:
         run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features wasm -- -D warnings
       - name: Feature matrix
         run: |
-          for f in "" hid manager-api hsm manager attestation scp loader eth btc sol; do
+          for f in "" hid manager-api hsm manager attestation scp loader recover eth btc sol; do
             echo "::group::features=[$f]"
             cargo check --no-default-features --features "$f"
             echo "::endgroup::"

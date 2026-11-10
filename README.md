@@ -61,9 +61,10 @@ Everything is behind cargo features:
 | `attestation` | offline genuine check: device attestation verified locally against pinned issuer keys |
 | `scp` | dashboard secure channel: secure commands, custom CA management |
 | `loader` | app images from ELF / Intel HEX, sideloading through the secure channel |
+| `recover` | self-hosted seed backup through the Recover protocol (3 shares, your CA as backup service) |
 | `eth`, `btc`, `sol`, `apps` | app clients; transactions generated with outscript |
 | `serde` | serde derives on public types |
-| `full` | `hid` + `manager` + `apps` + `attestation` + `scp` + `loader` |
+| `full` | `hid` + `manager` + `apps` + `attestation` + `scp` + `loader` + `recover` |
 | `wasm` | JS bindings used by the web console |
 | `cli` | the `lsdk` command line tool |
 
@@ -160,6 +161,24 @@ Intel HEX files work too, with `--name`, `--flags`, `--api-level`,
 
 Recovery mode: hold the right button while plugging in (Nano S Plus) or
 powering on (Nano X). `lsdk ca remove` deletes the CA.
+
+### Self-hosted seed backup (Recover protocol)
+
+The dashboard can split the seed into 3 encrypted shares (any 2 restore it)
+for backup providers certified by a CA. With your own CA, you are the backup
+service:
+
+```sh
+lsdk ca install --recover --name "backup CA"   # recovery mode; CA through the Recover channel
+lsdk recover init --first-name John --last-name Doe --birth "1 January 1980"   # conf.json
+lsdk recover backup -c conf.json -o shares/    # Backup_N.json + DeleteBackup_N.json
+lsdk recover restore -c conf.json shares/Backup_1.json shares/Backup_2.json   # device: restore from backup
+lsdk recover delete -c conf.json shares/DeleteBackup_*.json
+lsdk ca remove --recover --name "backup CA"    # vendor app installs fail while a CA is set
+```
+
+Files use the formats of the vendor's legacy tooling. Shares are secrets:
+store them encrypted and apart.
 
 ### Linux: udev rules
 

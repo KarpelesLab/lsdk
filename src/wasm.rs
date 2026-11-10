@@ -76,6 +76,14 @@ fn scp_emitter(cb: &Option<Function>) -> impl FnMut(crate::scp::ScpEvent) + '_ {
     }
 }
 
+fn recover_emitter(cb: &Option<Function>) -> impl FnMut(crate::recover::RecoverEvent) + '_ {
+    move |ev| {
+        if let (Some(cb), Ok(v)) = (cb, to_js(&ev)) {
+            let _ = cb.call1(&JsValue::NULL, &v);
+        }
+    }
+}
+
 fn emitter(cb: Option<Function>) -> impl FnMut(HsmEvent) {
     move |ev: HsmEvent| {
         if let Some(cb) = &cb
@@ -114,6 +122,14 @@ pub fn btc_derive_addresses(
         out.push(addr);
     }
     to_js(&out)
+}
+
+/// New Recover configuration (fresh orchestrator / provider keys), in the
+/// legacy `conf.json` format. `user`: `{first_name, last_name, birth, city}`.
+#[wasm_bindgen(js_name = recoverGenerateConfig)]
+pub fn recover_generate_config(user: JsValue, backup_name: String) -> JsResult<JsValue> {
+    let user: crate::recover::UserInfo = from_js(user)?;
+    to_js(&crate::recover::RecoverConfig::generate(user, &backup_name).map_err(js_err)?)
 }
 
 /// Generate a CA / root key. Returns `{ privateKey, publicKey }` (hex).
@@ -905,6 +921,82 @@ impl HwDevice {
         crate::loader::install_app_with(&mut chan, &img, &opts, &mut progress)
             .await
             .map_err(js_err)
+    }
+
+    // ---- Recover (self-hosted seed backup) ----
+
+    /// Back up the seed into 3 shares. Returns `[{provider, backupFile,
+    /// deleteFile}]` (contents of `Backup_N.json` / `DeleteBackup_N.json`).
+    #[wasm_bindgen(js_name = recoverBackup)]
+    pub async fn recover_backup(
+        &self,
+        conf: JsValue,
+        ca_key: String,
+        on_event: Option<Function>,
+    ) -> JsResult<JsValue> {
+        let conf: crate::recover::RecoverConfig = from_js(conf)?;
+        let ca = crate::scp::RootKey::from_hex(&ca_key).map_err(js_err)?;
+        let out = crate::recover::backup(&self.device, &ca, &conf, &mut recover_emitter(&on_event))
+            .await
+            .map_err(js_err)?;
+        let v: Vec<serde_json::Value> = out
+            .iter()
+            .map(|b| serde_json::json!({ "provider": b.provider, "backupFile": b.backup_json(), "deleteFile": b.delete_json() }))
+            .collect();
+        to_js(&v)
+    }
+
+    /// Restore from `Backup_N.json` contents (array of objects, 2 or 3).
+    #[wasm_bindgen(js_name = recoverRestore)]
+    pub async fn recover_restore(
+        &self,
+        conf: JsValue,
+        ca_key: String,
+        backups: JsValue,
+        on_event: Option<Function>,
+    ) -> JsResult<()> {
+        let conf: crate::recover::RecoverConfig = from_js(conf)?;
+        let ca = crate::scp::RootKey::from_hex(&ca_key).map_err(js_err)?;
+        let files: Vec<std::collections::BTreeMap<String, crate::recover::ShareBackup>> =
+            from_js(backups)?;
+        let shares = files.into_iter().flatten().collect();
+        crate::recover::restore(
+            &self.device,
+            &ca,
+            &conf,
+            &shares,
+            &mut recover_emitter(&on_event),
+        )
+        .await
+        .map_err(js_err)
+    }
+
+    /// Delete backups from `DeleteBackup_N.json` contents (array of objects).
+    #[wasm_bindgen(js_name = recoverDelete)]
+    pub async fn recover_delete(
+        &self,
+        conf: JsValue,
+        ca_key: String,
+        files: JsValue,
+        on_event: Option<Function>,
+    ) -> JsResult<()> {
+        let conf: crate::recover::RecoverConfig = from_js(conf)?;
+        let ca = crate::scp::RootKey::from_hex(&ca_key).map_err(js_err)?;
+        let files: Vec<std::collections::BTreeMap<String, serde_json::Value>> = from_js(files)?;
+        let keys = files
+            .into_iter()
+            .flatten()
+            .map(|(n, v)| (n, v["public_key"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        crate::recover::delete(
+            &self.device,
+            &ca,
+            &conf,
+            &keys,
+            &mut recover_emitter(&on_event),
+        )
+        .await
+        .map_err(js_err)
     }
 
     // ---- Factory (devices not yet personalized) ----

@@ -107,6 +107,11 @@ enum Cmd {
         #[arg(long)]
         i_understand_the_seed_travels_over_usb: bool,
     },
+    /// Self-hosted seed backup through the Recover protocol (your CA as backup service).
+    Recover {
+        #[command(subcommand)]
+        cmd: RecoverCmd,
+    },
     /// Factory commands (devices not yet personalized only).
     Factory {
         #[command(subcommand)]
@@ -189,6 +194,53 @@ enum EndorseCmd {
     Reset {
         #[arg(long)]
         key: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecoverCmd {
+    /// Create a configuration (identity + fresh orchestrator / provider keys).
+    Init {
+        #[arg(long)]
+        first_name: String,
+        #[arg(long)]
+        last_name: String,
+        /// Date of birth, as it should appear on the device.
+        #[arg(long)]
+        birth: String,
+        #[arg(long, default_value = "")]
+        city: String,
+        #[arg(long, default_value = "lsdk backup")]
+        name: String,
+        #[arg(short, long, default_value = "conf.json")]
+        output: std::path::PathBuf,
+    },
+    /// Back up the seed into 3 shares (Backup_N.json + DeleteBackup_N.json).
+    Backup {
+        #[arg(short, long, default_value = "conf.json")]
+        config: std::path::PathBuf,
+        /// CA private key file (default: the lsdk CA key).
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+        /// Output directory.
+        #[arg(short, long, default_value = ".")]
+        output: std::path::PathBuf,
+    },
+    /// Restore the seed from 2 or 3 Backup_N.json files (device onboarding: restore from backup).
+    Restore {
+        #[arg(short, long, default_value = "conf.json")]
+        config: std::path::PathBuf,
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+        backups: Vec<std::path::PathBuf>,
+    },
+    /// Delete backups (DeleteBackup_N.json files).
+    Delete {
+        #[arg(short, long, default_value = "conf.json")]
+        config: std::path::PathBuf,
+        #[arg(long)]
+        ca: Option<std::path::PathBuf>,
+        files: Vec<std::path::PathBuf>,
     },
 }
 
@@ -800,6 +852,124 @@ async fn run(cli: Cli) -> Result<()> {
                 Err(e) => return Err(e),
             }
             println!("onboarded ({identity})");
+        }
+        Cmd::Recover { cmd } => {
+            use lsdk::recover::{self, RecoverConfig, RecoverEvent, UserInfo};
+            let read_json = |p: &std::path::Path| -> Result<serde_json::Value> {
+                let s = std::fs::read_to_string(p)
+                    .map_err(|e| Error::InvalidInput(format!("{}: {e}", p.display())))?;
+                serde_json::from_str(&s)
+                    .map_err(|e| Error::InvalidInput(format!("{}: {e}", p.display())))
+            };
+            let load_conf = |p: &std::path::Path| -> Result<RecoverConfig> {
+                serde_json::from_value(read_json(p)?)
+                    .map_err(|e| Error::InvalidInput(format!("{}: {e}", p.display())))
+            };
+            let mut events = |ev: RecoverEvent| match ev {
+                RecoverEvent::Channel { event } => scp_progress(event),
+                RecoverEvent::Provider { name } => eprintln!("> provider {name}"),
+                RecoverEvent::ConfirmOnDevice => {
+                    eprintln!("> check the identity shown on the device and confirm")
+                }
+                RecoverEvent::ShareVerified { name } => eprintln!("> {name}: done"),
+            };
+            let hint = |e: Error| match e {
+                Error::Status(sw) if (sw.0 >> 8) == 0x55 || sw.0 == 0x6982 => Error::App(format!(
+                    "{e}: is the CA installed through the Recover channel? (lsdk ca install --recover, in recovery mode)"
+                )),
+                e => e,
+            };
+            match cmd {
+                RecoverCmd::Init {
+                    first_name,
+                    last_name,
+                    birth,
+                    city,
+                    name,
+                    output,
+                } => {
+                    let conf = RecoverConfig::generate(
+                        UserInfo {
+                            first_name: first_name.clone(),
+                            last_name: last_name.clone(),
+                            birth: birth.clone(),
+                            city: city.clone(),
+                        },
+                        name,
+                    )?;
+                    std::fs::write(
+                        output,
+                        serde_json::to_string_pretty(&conf).unwrap_or_default(),
+                    )
+                    .map_err(|e| Error::App(format!("{}: {e}", output.display())))?;
+                    println!(
+                        "configuration written to {} (keep it secret: it holds the provider keys)",
+                        output.display()
+                    );
+                }
+                RecoverCmd::Backup { config, ca, output } => {
+                    let conf = load_conf(config)?;
+                    let ca = read_key(&ca.clone().unwrap_or_else(default_ca_path))?;
+                    let d = open(&cli)?;
+                    let backups = recover::backup(&d, &ca, &conf, &mut events)
+                        .await
+                        .map_err(hint)?;
+                    std::fs::create_dir_all(output).map_err(|e| Error::App(e.to_string()))?;
+                    for b in &backups {
+                        let write = |file: String, v: serde_json::Value| {
+                            let p = output.join(file);
+                            std::fs::write(&p, serde_json::to_string_pretty(&v).unwrap_or_default())
+                                .map_err(|e| Error::App(format!("{}: {e}", p.display())))
+                        };
+                        write(format!("{}.json", b.provider), b.backup_json())?;
+                        write(format!("Delete{}.json", b.provider), b.delete_json())?;
+                    }
+                    println!(
+                        "{} shares written to {} (encrypt them before storing them)",
+                        backups.len(),
+                        output.display()
+                    );
+                }
+                RecoverCmd::Restore {
+                    config,
+                    ca,
+                    backups,
+                } => {
+                    let conf = load_conf(config)?;
+                    let ca = read_key(&ca.clone().unwrap_or_else(default_ca_path))?;
+                    let mut shares = std::collections::BTreeMap::new();
+                    for p in backups {
+                        let v: std::collections::BTreeMap<String, recover::ShareBackup> =
+                            serde_json::from_value(read_json(p)?)
+                                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                        shares.extend(v);
+                    }
+                    let d = open(&cli)?;
+                    recover::restore(&d, &ca, &conf, &shares, &mut events)
+                        .await
+                        .map_err(hint)?;
+                    println!("seed restored from {} shares", shares.len());
+                }
+                RecoverCmd::Delete { config, ca, files } => {
+                    let conf = load_conf(config)?;
+                    let ca = read_key(&ca.clone().unwrap_or_else(default_ca_path))?;
+                    let mut keys = std::collections::BTreeMap::new();
+                    for p in files {
+                        let v: std::collections::BTreeMap<String, serde_json::Value> =
+                            serde_json::from_value(read_json(p)?)
+                                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                        for (name, entry) in v {
+                            let pk = entry["public_key"].as_str().unwrap_or_default().to_string();
+                            keys.insert(name, pk);
+                        }
+                    }
+                    let d = open(&cli)?;
+                    recover::delete(&d, &ca, &conf, &keys, &mut events)
+                        .await
+                        .map_err(hint)?;
+                    println!("{} backups deleted", keys.len());
+                }
+            }
         }
         Cmd::Factory { cmd } => {
             let d = open(&cli)?;

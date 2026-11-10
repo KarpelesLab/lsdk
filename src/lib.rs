@@ -56,6 +56,9 @@ pub mod scp;
 #[cfg(feature = "loader")]
 pub mod loader;
 
+#[cfg(feature = "recover")]
+pub mod recover;
+
 #[cfg(any(feature = "eth", feature = "btc", feature = "sol"))]
 pub mod apps;
 

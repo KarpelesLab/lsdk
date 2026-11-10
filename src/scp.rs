@@ -105,7 +105,8 @@ impl RootKey {
         Ok(der_encode(&sig))
     }
 
-    fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
+    /// DER ECDSA signature of `sha256(data)`.
+    pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
         let sig = self
             .0
             .sign::<Sha256>(data)
@@ -190,8 +191,22 @@ pub struct SecureChannel<'d, T: Transport> {
     session: Session,
     /// Device attestation public key (from its factory certificate).
     pub device_public_key: Vec<u8>,
+    /// Device ephemeral public key of this session.
+    pub device_ephemeral_key: Vec<u8>,
     /// Firmware information read before the handshake.
     pub version: OsVersion,
+}
+
+/// How the host authenticates.
+#[derive(Clone, Copy, Debug)]
+pub enum HostAuth<'k> {
+    /// A self-signed root key (custom CA private key, or any key).
+    Root(&'k RootKey),
+    /// Recover orchestrator: `orchestrator` certified by the custom `ca`.
+    Orchestrator {
+        ca: &'k RootKey,
+        orchestrator: &'k RootKey,
+    },
 }
 
 /// Secure channel flavor.
@@ -215,6 +230,32 @@ enum Session {
     Recover {
         siv: AesSiv,
     },
+}
+
+/// Recover-style AES-SIV key between a host private key and a device public
+/// key: `secret = sha256(x || 00000001)`, key = `AES256(secret, 0x01*16) ||
+/// AES256(secret, 0x02*16)`.
+pub fn recover_siv_key(host: &RootKey, device_public: &[u8]) -> Result<[u8; 32]> {
+    let scalar =
+        Scalar::from_bytes_be(&host.to_bytes()).map_err(|_| Error::App("bad key".into()))?;
+    Ok(siv_key_from_x(&ecdh_x(
+        &RootKeyScalar(scalar),
+        device_public,
+    )?))
+}
+
+fn siv_key_from_x(x: &[u8; 32]) -> [u8; 32] {
+    let mut buf = x.to_vec();
+    buf.extend_from_slice(&[0, 0, 0, 1]);
+    let secret = sha256(&buf);
+    let aes = Aes256::new(&secret);
+    let mut key = [0u8; 32];
+    let (mut b1, mut b2) = ([1u8; 16], [2u8; 16]);
+    aes.encrypt_block(&mut b1);
+    aes.encrypt_block(&mut b2);
+    key[..16].copy_from_slice(&b1);
+    key[16..].copy_from_slice(&b2);
+    key
 }
 
 fn ecdh_x(private: &RootKeyScalar, public: &[u8]) -> Result<[u8; 32]> {
@@ -287,6 +328,22 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         mode: ScpMode,
         on_event: &mut dyn FnMut(ScpEvent),
     ) -> Result<Self> {
+        Self::open_with(device, HostAuth::Root(root), mode, on_event).await
+    }
+
+    /// Open a channel with any host authentication.
+    pub async fn open_with(
+        device: &'d Device<T>,
+        auth: HostAuth<'_>,
+        mode: ScpMode,
+        on_event: &mut dyn FnMut(ScpEvent),
+    ) -> Result<Self> {
+        let (root, ca, role, eph_role, cert_id) = match auth {
+            HostAuth::Root(r) => (r, None, 0x01u8, 0x11u8, 0x00u8),
+            HostAuth::Orchestrator { ca, orchestrator } => {
+                (orchestrator, Some(ca), 0x05, 0x15, 0x01)
+            }
+        };
         if !device.is_on_dashboard().await? {
             return Err(Error::DashboardExpected);
         }
@@ -331,11 +388,11 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         }
         let device_nonce: [u8; 8] = info[4..12].try_into().unwrap();
 
-        // Host root certificate (self-signed).
+        // Host root certificate (self-signed, or by the CA for an orchestrator).
         let root_pub = root.public_key();
-        let mut data = vec![0x01];
+        let mut data = vec![role];
         data.extend_from_slice(&root_pub);
-        let sig = root.sign(&data)?;
+        let sig = ca.unwrap_or(root).sign(&data)?;
         on_event(ScpEvent::PermissionRequested {
             host_public_key: hex::encode(root_pub),
         });
@@ -344,7 +401,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
                 0xe0,
                 0x51,
                 0x00,
-                0x00,
+                cert_id,
                 host_certificate(&root_pub, &sig),
             ))
             .await?;
@@ -356,7 +413,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         // Host ephemeral key.
         let eph = random_key()?;
         let eph_pub = eph.public_key().to_sec1();
-        let mut data = vec![0x11];
+        let mut data = vec![eph_role];
         data.extend_from_slice(&host_nonce);
         data.extend_from_slice(&device_nonce);
         data.extend_from_slice(&eph_pub);
@@ -366,7 +423,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
                 0xe0,
                 0x51,
                 0x80,
-                0x00,
+                cert_id,
                 host_certificate(&eph_pub, &sig),
             ))
             .await?;
@@ -385,17 +442,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
 
         let (session, static_cert) = if recover {
             // secret = sha256(x || 00000001); SIV key from AES-256-ECB blocks.
-            let x = ecdh_x(&RootKeyScalar(scalar), &dev_eph)?;
-            let mut buf = x.to_vec();
-            buf.extend_from_slice(&[0, 0, 0, 1]);
-            let secret = sha256(&buf);
-            let aes = Aes256::new(&secret);
-            let mut key = [0u8; 32];
-            let (mut b1, mut b2) = ([1u8; 16], [2u8; 16]);
-            aes.encrypt_block(&mut b1);
-            aes.encrypt_block(&mut b2);
-            key[..16].copy_from_slice(&b1);
-            key[16..].copy_from_slice(&b2);
+            let key = siv_key_from_x(&ecdh_x(&RootKeyScalar(scalar), &dev_eph)?);
             let siv = AesSiv::new(&key);
             let open = |c: &[u8]| {
                 siv.open(&[], c)
@@ -438,6 +485,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             device,
             session,
             device_public_key,
+            device_ephemeral_key: dev_eph,
             version,
         })
     }

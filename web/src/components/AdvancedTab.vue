@@ -9,6 +9,7 @@ import ScreensaverPanel from './advanced/ScreensaverPanel.vue'
 import DeveloperPanel from './advanced/DeveloperPanel.vue'
 import EndorsementPanel from './advanced/EndorsementPanel.vue'
 import FactoryPanel from './advanced/FactoryPanel.vue'
+import RecoverPanel from './advanced/RecoverPanel.vue'
 
 const panels = [
   { id: 'eth', label: 'Ethereum / EVM', comp: EthPanel },
@@ -16,6 +17,7 @@ const panels = [
   { id: 'sol', label: 'Solana', comp: SolPanel },
   { id: 'developer', label: 'Developer', comp: DeveloperPanel },
   { id: 'screensaver', label: 'Screensaver', comp: ScreensaverPanel },
+  { id: 'recover', label: 'Seed backup', comp: RecoverPanel },
   { id: 'endorsement', label: 'Endorsement', comp: EndorsementPanel },
   { id: 'factory', label: 'Factory', comp: FactoryPanel },
   { id: 'apdu', label: 'Raw APDU', comp: ApduPanel },
