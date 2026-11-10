@@ -30,7 +30,13 @@ impl WsConn {
                 Ok(Message::Binary(b)) => return Ok(Some(String::from_utf8_lossy(&b).into_owned())),
                 Ok(Message::Close(_)) => return Ok(None),
                 Ok(_) => continue,
-                Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed) => return Ok(None),
+                Err(
+                    tokio_tungstenite::tungstenite::Error::ConnectionClosed
+                    | tokio_tungstenite::tungstenite::Error::AlreadyClosed
+                    | tokio_tungstenite::tungstenite::Error::Protocol(
+                        tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                    ),
+                ) => return Ok(None),
                 Err(e) => return Err(ws_err(e)),
             }
         }
