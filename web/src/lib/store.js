@@ -12,6 +12,7 @@ export const state = reactive({
   busy: null, // label of the running operation
   progress: null, // 0..1 or null
   prompt: null, // message asking for an action on the device
+  promptDetail: null, // value to compare with what the device displays
   log: [],
   // Firmware update flow: null | 'osu' | 'reboot' | 'mcu' | 'done'
   fwPhase: null,
@@ -132,6 +133,7 @@ export async function run(label, fn, { retryOnDisconnect = true } = {}) {
   state.busy = label
   state.progress = null
   state.prompt = null
+  state.promptDetail = null
   try {
     try {
       return await fn(state.device)
@@ -152,6 +154,7 @@ export async function run(label, fn, { retryOnDisconnect = true } = {}) {
     state.busy = null
     state.progress = null
     state.prompt = null
+    state.promptDetail = null
   }
 }
 

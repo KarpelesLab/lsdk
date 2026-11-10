@@ -38,10 +38,18 @@ pub const KNOWN_ISSUER_KEYS: &[(&str, &str)] = &[(
 /// Events reported during the check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-#[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "camelCase"))]
+#[cfg_attr(
+    feature = "serde",
+    serde(
+        tag = "type",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase"
+    )
+)]
 pub enum AttestationEvent {
-    /// The device asks the user to allow the (insecure) connection.
-    PermissionRequested,
+    /// The device asks the user to allow the (insecure) connection, showing
+    /// this host public key (hex, uncompressed): the user should compare it.
+    PermissionRequested { host_public_key: String },
     /// The user allowed it.
     PermissionGranted,
     /// The device is signing its ephemeral key (takes a few seconds).
@@ -69,6 +77,8 @@ pub struct Attestation {
     pub certificate_header: String,
     /// Issuer certificate signature (hex DER).
     pub certificate_signature: String,
+    /// The self-signed host key the user allowed on the device (hex).
+    pub host_public_key: String,
     /// Public keys that could have produced the device certificate signature
     /// (recovered from it). One of them is the actual issuer key: useful to
     /// identify and pin the issuer of a model not in [`KNOWN_ISSUER_KEYS`].
@@ -270,7 +280,9 @@ pub async fn offline_genuine_check<T: Transport>(
     let sig = root
         .sign::<Sha256>(&data)
         .map_err(|e| Error::App(format!("sign: {e:?}")))?;
-    on_event(AttestationEvent::PermissionRequested);
+    on_event(AttestationEvent::PermissionRequested {
+        host_public_key: hex::encode(root_pub),
+    });
     let r = device
         .exchange(&Apdu::with_data(
             0xe0,
@@ -352,6 +364,7 @@ pub async fn offline_genuine_check<T: Transport>(
         device_public_key: hex::encode(&device_pub),
         certificate_header: hex::encode(&header),
         certificate_signature: hex::encode(&cert_sig),
+        host_public_key: hex::encode(root_pub),
         issuer_candidates: recover_candidates(&signed, &cert_sig),
     })
 }

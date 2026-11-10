@@ -43,8 +43,11 @@ const checkOffline = () => guard(async () => {
   try { localStorage.setItem('lsdk.issuerKeys', extraKeys.value) } catch { /* private mode */ }
   const keys = extraKeys.value.split(/\s+/).filter(Boolean)
   offline.value = await run('offline genuine check', (d) => d.offlineGenuineCheck((ev) => {
-    if (ev.type === 'permissionRequested') state.prompt = 'Allow the insecure manager connection on the device'
-    if (ev.type === 'permissionGranted') state.prompt = null
+    if (ev.type === 'permissionRequested') {
+      state.prompt = 'Compare the manager key, then allow the insecure connection on the device'
+      state.promptDetail = ev.hostPublicKey
+    }
+    if (ev.type === 'permissionGranted') { state.prompt = null; state.promptDetail = null }
     if (ev.type === 'attesting') state.prompt = 'The device is signing its attestation (a few seconds)…'
   }, keys))
   log(offline.value.genuine ? 'ok' : 'error', offline.value.genuine
@@ -146,6 +149,7 @@ const quit = () => guard(quitApp)
         </details>
         <dl v-if="offline" class="kv" style="margin-top:10px">
           <dt>Issuer</dt><dd>{{ offline.issuer || 'no known issuer key matches' }}</dd>
+          <dt>Manager key allowed</dt><dd>{{ offline.hostPublicKey }}</dd>
           <dt>Proof of possession</dt><dd>{{ offline.proofOfPossession ? 'valid' : 'INVALID' }}</dd>
           <dt>Device key</dt><dd>{{ offline.devicePublicKey }}</dd>
           <dt>Signer serial</dt><dd>{{ offline.signerSerial }}</dd>

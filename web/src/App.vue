@@ -85,6 +85,10 @@ onMounted(() => boot().catch((e) => { error.value = errorText(e); log('error', e
               <strong>{{ state.busy }}</strong>
               <span v-if="state.prompt" class="badge accent">{{ state.prompt }}</span>
             </div>
+            <div v-if="state.promptDetail" class="detail">
+              <div class="muted small-text">The device shows this key, check that it matches before allowing:</div>
+              <div class="mono key">{{ state.promptDetail.match(/.{1,8}/g).join(' ') }}</div>
+            </div>
             <div v-if="state.progress !== null" class="bar"><div :style="{ width: (state.progress * 100).toFixed(1) + '%' }"></div></div>
           </div>
           <KeepAlive>
@@ -109,6 +113,8 @@ onMounted(() => boot().catch((e) => { error.value = errorText(e); log('error', e
 .hero { padding: 32px; }
 .hero p { max-width: 60ch; }
 .busy { margin-bottom: 14px; padding: 12px 16px; border-color: var(--accent); }
+.detail { margin-top: 10px; }
+.key { font-size: 14px; line-height: 1.7; word-spacing: 4px; background: var(--panel-2); border-radius: 8px; padding: 8px 12px; margin-top: 4px; word-break: break-word; }
 .bar { height: 6px; background: var(--panel-2); border-radius: 99px; margin-top: 10px; overflow: hidden; }
 .bar div { height: 100%; background: var(--accent); transition: width .2s; }
 .spinner { width: 14px; height: 14px; border: 2px solid var(--accent-soft); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }

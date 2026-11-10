@@ -346,9 +346,9 @@ async fn run(cli: Cli) -> Result<()> {
             let att = lsdk::attestation::offline_genuine_check(&open(&cli)?, &extra, &mut |ev| {
                 use lsdk::attestation::AttestationEvent::*;
                 match ev {
-                    PermissionRequested => {
-                        eprintln!("> allow the (insecure) manager connection on the device")
-                    }
+                    PermissionRequested { host_public_key } => eprintln!(
+                        "> the device shows this manager key, check it matches, then allow:\n  {host_public_key}"
+                    ),
                     PermissionGranted => eprintln!("> allowed"),
                     Attesting => eprintln!("> device is signing its attestation..."),
                 }
