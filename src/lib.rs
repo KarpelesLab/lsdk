@@ -50,6 +50,12 @@ pub mod hsm;
 #[cfg(feature = "attestation")]
 pub mod attestation;
 
+#[cfg(feature = "scp")]
+pub mod scp;
+
+#[cfg(feature = "loader")]
+pub mod loader;
+
 #[cfg(any(feature = "eth", feature = "btc", feature = "sol"))]
 pub mod apps;
 

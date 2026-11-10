@@ -85,7 +85,7 @@ pub struct Attestation {
     pub issuer_candidates: Vec<String>,
 }
 
-fn rand_bytes(buf: &mut [u8]) -> Result<()> {
+pub(crate) fn rand_bytes(buf: &mut [u8]) -> Result<()> {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
@@ -109,7 +109,7 @@ fn rand_bytes(buf: &mut [u8]) -> Result<()> {
     }
 }
 
-fn random_key() -> Result<Secp256k1EcdsaPrivateKey> {
+pub(crate) fn random_key() -> Result<Secp256k1EcdsaPrivateKey> {
     loop {
         let mut k = [0u8; 32];
         rand_bytes(&mut k)?;
@@ -120,7 +120,7 @@ fn random_key() -> Result<Secp256k1EcdsaPrivateKey> {
 }
 
 /// DER-encode an ECDSA signature.
-fn der_encode(sig: &Secp256k1EcdsaSignature) -> Vec<u8> {
+pub(crate) fn der_encode(sig: &Secp256k1EcdsaSignature) -> Vec<u8> {
     fn int(v: &[u8; 32]) -> Vec<u8> {
         let mut b: Vec<u8> = v.iter().copied().skip_while(|x| *x == 0).collect();
         if b.is_empty() || b[0] & 0x80 != 0 {
@@ -138,7 +138,7 @@ fn der_encode(sig: &Secp256k1EcdsaSignature) -> Vec<u8> {
 }
 
 /// Decode a DER ECDSA signature into `(r, s)`.
-fn der_decode(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
+pub(crate) fn der_decode(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     let bad = || Error::InvalidResponse("bad DER signature".into());
     let mut r = Reader::new(der);
     if r.u8()? != 0x30 {
@@ -164,7 +164,7 @@ fn der_decode(der: &[u8]) -> Result<([u8; 32], [u8; 32])> {
     Ok((a, b))
 }
 
-fn verify(pubkey: &[u8], msg: &[u8], der_sig: &[u8]) -> bool {
+pub(crate) fn verify(pubkey: &[u8], msg: &[u8], der_sig: &[u8]) -> bool {
     let Ok(pk) = Secp256k1EcdsaPublicKey::from_sec1(pubkey) else {
         return false;
     };
@@ -207,7 +207,7 @@ fn recover_candidates(msg: &[u8], der_sig: &[u8]) -> Vec<String> {
 }
 
 /// A host certificate: `len(pub) || pub || len(sig) || sig`.
-fn host_certificate(pubkey: &[u8; 65], sig: &[u8]) -> Vec<u8> {
+pub(crate) fn host_certificate(pubkey: &[u8; 65], sig: &[u8]) -> Vec<u8> {
     let mut c = vec![pubkey.len() as u8];
     c.extend_from_slice(pubkey);
     c.push(sig.len() as u8);

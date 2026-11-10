@@ -72,6 +72,22 @@ enum Cmd {
     Rename { name: String },
     /// Battery status.
     Battery,
+    /// Custom certificate authority (needed to sideload apps).
+    Ca {
+        #[command(subcommand)]
+        cmd: CaCmd,
+    },
+    /// Sideload / manage apps through the secure channel.
+    App {
+        #[command(subcommand)]
+        cmd: AppCmd,
+    },
+    /// Memory usage (secure channel).
+    Meminfo {
+        /// Root key file (defaults to the CA key if present, else a random key).
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+    },
     /// Custom screensaver (Nano X / Nano S Plus, recovery mode only).
     Screensaver {
         #[command(subcommand)]
@@ -98,6 +114,83 @@ enum Cmd {
     Sol {
         #[command(subcommand)]
         cmd: SolCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum CaCmd {
+    /// Generate the CA key (stored in the lsdk config directory).
+    Keygen {
+        /// Overwrite an existing key.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+    },
+    /// Show the CA public key.
+    Show {
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+    },
+    /// Install the CA on the device (recovery mode, confirmed on device).
+    Install {
+        /// Name shown by the device when the CA connects.
+        #[arg(long, default_value = "lsdk dev")]
+        name: String,
+        /// CA key file (default: the lsdk CA key).
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+        /// Install this public key (hex) instead of the key file's.
+        #[arg(long)]
+        public: Option<String>,
+    },
+    /// Remove the custom CA from the device (recovery mode, confirmed on device).
+    Remove,
+}
+
+#[derive(Subcommand)]
+enum AppCmd {
+    /// Install an app from its ELF (or Intel HEX with --name and friends).
+    Load {
+        file: std::path::PathBuf,
+        /// CA key file (default: the lsdk CA key).
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+        /// Keep an installed app with the same name (fails if present).
+        #[arg(long)]
+        no_replace: bool,
+        /// Only print what would be installed.
+        #[arg(long)]
+        dry_run: bool,
+        /// HEX input: app name.
+        #[arg(long)]
+        name: Option<String>,
+        /// HEX input: app flags (e.g. 0x200).
+        #[arg(long)]
+        flags: Option<String>,
+        /// HEX input: API level.
+        #[arg(long)]
+        api_level: Option<u8>,
+        /// HEX input: NVRAM data size.
+        #[arg(long)]
+        data_size: Option<u32>,
+        /// HEX input: install parameters size.
+        #[arg(long)]
+        install_params_size: Option<u32>,
+    },
+    /// Delete an app by name (or --hash).
+    Delete {
+        name: String,
+        /// Treat NAME as the app's full hash (hex).
+        #[arg(long)]
+        hash: bool,
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+    },
+    /// List apps through the secure channel.
+    List {
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
     },
 }
 
@@ -418,6 +511,152 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Quit => open(&cli)?.quit_app().await?,
         Cmd::Name => println!("{}", open(&cli)?.get_device_name().await?),
         Cmd::Rename { name } => open(&cli)?.set_device_name(name).await?,
+        Cmd::Ca { cmd } => match cmd {
+            CaCmd::Keygen { force, key } => {
+                let path = key.clone().unwrap_or_else(default_ca_path);
+                if path.exists() && !force {
+                    return Err(Error::InvalidInput(format!(
+                        "{} exists (use --force to replace it)",
+                        path.display()
+                    )));
+                }
+                let k = lsdk::scp::RootKey::generate()?;
+                write_key(&path, &k)?;
+                println!("CA key written to {}", path.display());
+                println!("public key: {}", hex::encode(k.public_key()));
+            }
+            CaCmd::Show { key } => {
+                let k = read_key(&key.clone().unwrap_or_else(default_ca_path))?;
+                println!("{}", hex::encode(k.public_key()));
+            }
+            CaCmd::Install { name, key, public } => {
+                let public = match public {
+                    Some(p) => hex::decode(p.trim_start_matches("0x"))
+                        .map_err(|e| Error::InvalidInput(e.to_string()))?,
+                    None => read_key(&key.clone().unwrap_or_else(default_ca_path))?
+                        .public_key()
+                        .to_vec(),
+                };
+                let d = open(&cli)?;
+                // Any root key works here: the device asks to allow it.
+                let root = lsdk::scp::RootKey::generate()?;
+                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                eprintln!("> confirm installing the CA \"{name}\" on the device");
+                chan.setup_custom_ca(name, &public).await.map_err(ca_hint)?;
+                println!("custom CA \"{name}\" installed: {}", hex::encode(&public));
+            }
+            CaCmd::Remove => {
+                let d = open(&cli)?;
+                let root = lsdk::scp::RootKey::generate()?;
+                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                eprintln!("> confirm removing the custom CA on the device");
+                chan.reset_custom_ca().await.map_err(ca_hint)?;
+                println!("custom CA removed");
+            }
+        },
+        Cmd::App { cmd } => match cmd {
+            AppCmd::Load {
+                file,
+                key,
+                no_replace,
+                dry_run,
+                name,
+                flags,
+                api_level,
+                data_size,
+                install_params_size,
+            } => {
+                let raw = std::fs::read(file)
+                    .map_err(|e| Error::InvalidInput(format!("{}: {e}", file.display())))?;
+                let mut img = if raw.starts_with(b"\x7fELF") {
+                    lsdk::loader::AppImage::from_elf(&raw)?
+                } else {
+                    let name = name.clone().ok_or_else(|| {
+                        Error::InvalidInput("--name is required for HEX files".into())
+                    })?;
+                    lsdk::loader::AppImage::from_ihex(&String::from_utf8_lossy(&raw), &name)?
+                };
+                if let Some(f) = flags {
+                    img.flags = u32::from_str_radix(f.trim_start_matches("0x"), 16)
+                        .map_err(|e| Error::InvalidInput(format!("--flags: {e}")))?;
+                }
+                if api_level.is_some() {
+                    img.api_level = *api_level;
+                }
+                if let Some(v) = data_size {
+                    img.data_size = *v;
+                }
+                if let Some(v) = install_params_size {
+                    img.install_params_size = *v;
+                }
+                eprintln!(
+                    "{} {} (flags 0x{:x}, api {:?}, {} bytes, target {})",
+                    img.name,
+                    img.version.as_deref().unwrap_or(""),
+                    img.flags,
+                    img.api_level,
+                    img.image_size(),
+                    img.target_id
+                        .map(|t| format!("0x{t:08x}"))
+                        .unwrap_or_else(|| "?".into())
+                );
+                if *dry_run {
+                    println!("create_app {}", hex::encode(img.create_app_params()?));
+                    return Ok(());
+                }
+                let root = read_key(&key.clone().unwrap_or_else(default_ca_path)).map_err(|e| {
+                    Error::InvalidInput(format!(
+                        "{e}\nSideloading needs the custom CA key: run `lsdk ca keygen`, then `lsdk ca install` with the device in recovery mode"
+                    ))
+                })?;
+                let d = open(&cli)?;
+                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                lsdk::loader::install_app(&mut chan, &img, !no_replace, &mut |sent, total| {
+                    eprint!("\r> loading {sent}/{total}");
+                    if sent == total {
+                        eprintln!();
+                    }
+                })
+                .await
+                .map_err(|e| match e {
+                    Error::Status(sw) if sw.0 == 0x6a80 || sw.0 == 0x6a81 => {
+                        Error::App(format!("{e}: an app with this name is already installed"))
+                    }
+                    Error::Status(sw) if sw.0 == 0x6a84 || sw.0 == 0x6a85 => {
+                        Error::App(format!("{e}: not enough space"))
+                    }
+                    e => e,
+                })?;
+                println!("installed {}", img.name);
+            }
+            AppCmd::Delete { name, hash, key } => {
+                let d = open(&cli)?;
+                let root = root_key(key.as_ref())?;
+                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                if *hash {
+                    let h: [u8; 32] = hex::decode(name)
+                        .ok()
+                        .and_then(|v| v.try_into().ok())
+                        .ok_or_else(|| Error::InvalidInput("hash must be 32 bytes hex".into()))?;
+                    chan.delete_app_by_hash(&h).await?;
+                } else {
+                    chan.delete_app(name).await?;
+                }
+                println!("deleted {name}");
+            }
+            AppCmd::List { key } => {
+                let d = open(&cli)?;
+                let root = root_key(key.as_ref())?;
+                let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                print(&chan.list_apps().await?);
+            }
+        },
+        Cmd::Meminfo { key } => {
+            let d = open(&cli)?;
+            let root = root_key(key.as_ref())?;
+            let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+            print(&chan.get_memory_info().await?);
+        }
         Cmd::Screensaver { cmd } => {
             use lsdk::os::{ScreenSaverAnimation, ScreenSaverSpeed};
             let d = open(&cli)?;
@@ -675,6 +914,73 @@ async fn repair_loop(manager: &Manager) -> Result<()> {
     Err(Error::App(
         "device still in bootloader mode after several flashes".into(),
     ))
+}
+
+fn config_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| ".".into())
+        .join("lsdk")
+}
+
+fn default_ca_path() -> std::path::PathBuf {
+    config_dir().join("ca.key")
+}
+
+fn write_key(path: &std::path::Path, key: &lsdk::scp::RootKey) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| Error::App(format!("{}: {e}", dir.display())))?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
+    writeln!(f, "{}", hex::encode(key.to_bytes())).map_err(|e| Error::App(e.to_string()))
+}
+
+fn read_key(path: &std::path::Path) -> Result<lsdk::scp::RootKey> {
+    let s = std::fs::read_to_string(path)
+        .map_err(|e| Error::InvalidInput(format!("{}: {e}", path.display())))?;
+    lsdk::scp::RootKey::from_hex(&s)
+}
+
+/// The CA key when present (no foreign-key prompt), else a random key.
+fn root_key(key: Option<&std::path::PathBuf>) -> Result<lsdk::scp::RootKey> {
+    match key {
+        Some(p) => read_key(p),
+        None if default_ca_path().exists() => read_key(&default_ca_path()),
+        None => lsdk::scp::RootKey::generate(),
+    }
+}
+
+fn scp_progress(ev: lsdk::scp::ScpEvent) {
+    match ev {
+        lsdk::scp::ScpEvent::PermissionRequested { host_public_key } => {
+            eprintln!("> allow the manager on the device; it shows this key:\n  {host_public_key}")
+        }
+        lsdk::scp::ScpEvent::PermissionGranted => eprintln!("> allowed"),
+        lsdk::scp::ScpEvent::Opened => {}
+    }
+}
+
+fn ca_hint(e: Error) -> Error {
+    match e {
+        Error::Status(sw) if sw.0 == 0x661e => {
+            Error::App("the device must be in recovery mode".into())
+        }
+        Error::Status(sw) if sw.0 == 0x6982 => {
+            Error::App("a custom CA is already installed: remove it first (lsdk ca remove)".into())
+        }
+        Error::Status(sw) if sw.0 == 0x6a84 => Error::App("no custom CA is installed".into()),
+        e => e,
+    }
 }
 
 fn main() {

@@ -37,6 +37,10 @@ hid = ["dep:hidapi"]
 webhid = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:futures-channel", "dep:futures-util"]
 ## Offline genuine check (device attestation against pinned issuer keys, no network)
 attestation = ["dep:purecrypto", "dep:js-sys", "dep:wasm-bindgen"]
+## Dashboard secure channel: secure commands, custom CA, app sideloading
+scp = ["attestation", "purecrypto/cipher"]
+## App images (ELF / Intel HEX) and sideloading through the secure channel
+loader = ["scp"]
 ## Manager HTTP API client (app catalog, firmware metadata)
 manager-api = ["dep:reqwest", "dep:serde", "dep:serde_json", "serde"]
 ## HSM secure channel over websocket (genuine check, app install/uninstall, firmware)
@@ -52,9 +56,9 @@ sol = ["dep:outscript", "outscript/solana"]
 ## All app clients
 apps = ["eth", "btc", "sol"]
 ## Everything usable on native targets
-full = ["hid", "manager", "apps", "attestation"]
+full = ["hid", "manager", "apps", "attestation", "scp", "loader"]
 ## JS/wasm-bindgen API used by the web UI (wasm32 only)
-wasm = ["webhid", "manager", "apps", "attestation", "serde", "dep:serde-wasm-bindgen"]
+wasm = ["webhid", "manager", "apps", "attestation", "scp", "loader", "serde", "dep:serde-wasm-bindgen"]
 ## Command line tool (`lsdk` binary)
 cli = ["full", "serde", "dep:clap", "tokio/rt", "tokio/macros"]
 ## Enable serde derives on public data types
