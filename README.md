@@ -24,6 +24,13 @@ USB HID natively or through WebHID in the browser.
   (with [outscript](https://crates.io/crates/outscript)) and sign them on the
   device: Ethereum / EVM, Bitcoin (PSBT, wallet policies), Solana
 
+> **About genuine checks:** a successful genuine check (online or offline)
+> proves the secure element is authentic and its firmware unmodified. It does
+> not prove the rest of the device is clean: extra hardware (a spy implant, a
+> modified screen, USB or Bluetooth chip...) can sit next to a genuine secure
+> element. Only a device bought directly from the manufacturer guarantees
+> nothing was added.
+
 This project is not affiliated with or endorsed by the device manufacturer.
 
 ## Web console

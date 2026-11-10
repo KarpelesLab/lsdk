@@ -130,8 +130,14 @@ impl Manager {
         })
     }
 
-    /// Run the genuine check. Returns `true` if the HSM vouches for the device.
-    /// The user has to allow the secure channel on the device.
+    /// Run the genuine check.
+    ///
+    /// It proves the secure element is authentic and its firmware unmodified,
+    /// not that the rest of the device is free of added hardware (spy
+    /// implants...): only buying directly from the manufacturer guarantees that.
+    ///
+    /// Returns `true` if the HSM vouches for the device. The user has to
+    /// allow the secure channel on the device.
     pub async fn genuine_check<T: Transport>(
         &self,
         device: &Device<T>,

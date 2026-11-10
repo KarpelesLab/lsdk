@@ -133,6 +133,13 @@ const quit = () => guard(quitApp)
           <span v-if="genuine === false" class="badge err">✗ not genuine</span>
         </div>
 
+        <p class="note small-text">
+          <b>What this does not prove:</b> a successful check shows the secure element is authentic and its firmware
+          unmodified. It cannot detect extra hardware placed in the device (a spy implant, a modified screen, USB or
+          Bluetooth chip...) next to a genuine secure element. Only a device bought directly from the manufacturer
+          guarantees nothing was added.
+        </p>
+
         <h3>Offline genuine check</h3>
         <p class="muted small-text">
           Verifies the device attestation locally, without contacting the vendor: the device certificate must be

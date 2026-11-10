@@ -13,6 +13,12 @@
 //! certified at manufacturing; (2) shows the device holds that key right now
 //! (the host nonce makes it non-replayable). Nothing leaves the machine.
 //!
+//! A successful check proves the secure element is authentic and its
+//! firmware unmodified; it does not prove the rest of the device is clean
+//! (extra hardware such as a spy implant can sit next to a genuine secure
+//! element). Only a device bought directly from the manufacturer guarantees
+//! nothing was added.
+//!
 //! The handshake is not completed (no secure channel is opened), so this
 //! cannot change anything on the device. As a side effect, the next online
 //! manager operation asks again to allow the secure connection.

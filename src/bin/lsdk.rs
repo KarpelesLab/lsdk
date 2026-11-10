@@ -528,6 +528,8 @@ enum SolCmd {
     },
 }
 
+const GENUINE_NOTE: &str = "A successful genuine check proves the secure element is authentic and its firmware unmodified. It does not prove the rest of the device is clean: extra hardware (a spy implant, a modified screen, USB or Bluetooth chip...) can sit next to a genuine secure element. Only a device bought directly from the manufacturer guarantees nothing was added.";
+
 fn print<T: Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
 }
@@ -657,6 +659,9 @@ async fn run(cli: Cli) -> Result<()> {
                     "NOT VERIFIED"
                 }
             );
+            if att.genuine {
+                eprintln!("note: {GENUINE_NOTE}");
+            }
             if !att.genuine {
                 std::process::exit(2);
             }
@@ -664,6 +669,9 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Genuine { .. } => {
             let ok = manager.genuine_check(&open(&cli)?, &mut progress).await?;
             println!("{}", if ok { "genuine" } else { "NOT GENUINE" });
+            if ok {
+                eprintln!("note: {GENUINE_NOTE}");
+            }
             if !ok {
                 std::process::exit(2);
             }
