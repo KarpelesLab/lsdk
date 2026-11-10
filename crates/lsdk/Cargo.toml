@@ -1,0 +1,62 @@
+[package]
+name = "lsdk"
+description = "Rust SDK for hardware wallets speaking the BOLOS APDU protocol: HID/WebHID transport, device info, genuine check, app management, firmware updates and app signers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["hid"]
+## Native USB HID transport (hidapi)
+hid = ["dep:hidapi"]
+## Browser WebHID transport (wasm32 only)
+webhid = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:futures-channel", "dep:futures-util"]
+## Manager HTTP API client (app catalog, firmware metadata)
+manager-api = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+## HSM secure channel over websocket (genuine check, app install/uninstall, firmware)
+hsm = ["dep:serde", "dep:serde_json", "dep:tokio-tungstenite", "dep:futures-util", "dep:tokio", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:futures-channel"]
+## High level manager operations (requires manager-api + hsm)
+manager = ["manager-api", "hsm"]
+## Ethereum app client + transaction builder
+eth = ["dep:sha3"]
+## Bitcoin app client (PSBT signing, wallet policies)
+btc = ["dep:bitcoin", "dep:miniscript"]
+## Solana app client + transfer transaction builder
+sol = ["dep:bs58"]
+## All app clients
+apps = ["eth", "btc", "sol"]
+## Everything usable on native targets
+full = ["hid", "manager", "apps"]
+## Enable serde derives on public data types
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror = "2"
+hex = "0.4"
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.154", optional = true }
+sha3 = { version = "0.12.0", optional = true }
+bs58 = { version = "0.5.1", optional = true }
+bitcoin = { version = "0.32", default-features = false, features = ["std"], optional = true }
+miniscript = { version = "12", default-features = false, features = ["std"], optional = true }
+futures-channel = { version = "0.3.34", optional = true }
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"], optional = true }
+hidapi = { version = "2.6.7", optional = true }
+tokio = { version = "1.54.1", features = ["net", "time"], optional = true }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots", "connect"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3.107", optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["json"], optional = true }
+wasm-bindgen = { version = "0.2.130", optional = true }
+wasm-bindgen-futures = { version = "0.4.80", optional = true }
+web-sys = { version = "0.3.107", features = ["WebSocket", "MessageEvent", "CloseEvent", "Event", "BinaryType", "Window"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt"] }
