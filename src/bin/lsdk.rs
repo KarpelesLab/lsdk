@@ -392,6 +392,10 @@ enum CaCmd {
         /// Install this public key (hex) instead of the key file's.
         #[arg(long)]
         public: Option<String>,
+        /// Use the regular secure channel instead of the Recover one: firmware
+        /// older than Ledger Recover (e.g. Nano S Plus 1.0.x answers 0x650e).
+        #[arg(long)]
+        regular: bool,
     },
     /// Remove the custom CA from the device (recovery mode, confirmed on device).
     Remove {
@@ -1524,57 +1528,31 @@ async fn run(cli: Cli) -> Result<()> {
             };
             println!("{}", hex::encode(out));
         }
-        Cmd::Ca { cmd } => match cmd {
-            CaCmd::Keygen { force, key } => {
-                let path = key.clone().unwrap_or_else(default_ca_path);
-                if path.exists() && !force {
-                    return Err(Error::InvalidInput(format!(
-                        "{} exists (use --force to replace it)",
-                        path.display()
-                    )));
+        Cmd::Ca { cmd } => {
+            match cmd {
+                CaCmd::Keygen { force, key } => {
+                    let path = key.clone().unwrap_or_else(default_ca_path);
+                    if path.exists() && !force {
+                        return Err(Error::InvalidInput(format!(
+                            "{} exists (use --force to replace it)",
+                            path.display()
+                        )));
+                    }
+                    let k = lsdk::scp::RootKey::generate()?;
+                    write_key(&path, &k)?;
+                    println!("CA key written to {}", path.display());
+                    println!("public key: {}", hex::encode(k.public_key()));
                 }
-                let k = lsdk::scp::RootKey::generate()?;
-                write_key(&path, &k)?;
-                println!("CA key written to {}", path.display());
-                println!("public key: {}", hex::encode(k.public_key()));
-            }
-            CaCmd::Show { key } => {
-                let k = read_key(&key.clone().unwrap_or_else(default_ca_path))?;
-                println!("{}", hex::encode(k.public_key()));
-            }
-            CaCmd::Install { name, key, public } => {
-                let public = match public {
-                    Some(p) => hex::decode(p.trim_start_matches("0x"))
-                        .map_err(|e| Error::InvalidInput(e.to_string()))?,
-                    None => read_key(&key.clone().unwrap_or_else(default_ca_path))?
-                        .public_key()
-                        .to_vec(),
-                };
-                let d = open(&cli)?;
-                // Any root key works here: the device asks to allow it. The
-                // Recover channel is used because recent firmware no longer
-                // has the regular CA command (0x6d01).
-                let root = lsdk::scp::RootKey::generate()?;
-                let mut chan = lsdk::scp::SecureChannel::open_mode(
-                    &d,
-                    &root,
-                    lsdk::scp::ScpMode::Recover,
-                    &mut scp_progress,
-                )
-                .await?;
-                eprintln!("> confirm installing the CA \"{name}\" on the device");
-                chan.recover_set_ca(name, &public).await.map_err(ca_hint)?;
-                println!("custom CA \"{name}\" installed: {}", hex::encode(&public));
-            }
-            CaCmd::Remove {
-                recover,
-                name,
-                key,
-                public,
-            } => {
-                let d = open(&cli)?;
-                let root = lsdk::scp::RootKey::generate()?;
-                if *recover {
+                CaCmd::Show { key } => {
+                    let k = read_key(&key.clone().unwrap_or_else(default_ca_path))?;
+                    println!("{}", hex::encode(k.public_key()));
+                }
+                CaCmd::Install {
+                    name,
+                    key,
+                    public,
+                    regular,
+                } => {
                     let public = match public {
                         Some(p) => hex::decode(p.trim_start_matches("0x"))
                             .map_err(|e| Error::InvalidInput(e.to_string()))?,
@@ -1582,26 +1560,70 @@ async fn run(cli: Cli) -> Result<()> {
                             .public_key()
                             .to_vec(),
                     };
-                    let mut chan = lsdk::scp::SecureChannel::open_mode(
-                        &d,
-                        &root,
-                        lsdk::scp::ScpMode::Recover,
-                        &mut scp_progress,
-                    )
-                    .await?;
-                    eprintln!("> confirm removing the custom CA on the device");
-                    chan.recover_delete_ca(name, &public)
-                        .await
-                        .map_err(ca_hint)?;
-                } else {
+                    let d = open(&cli)?;
+                    // Any root key works here: the device asks to allow it. The
+                    // Recover channel by default: recent firmware no longer has the
+                    // regular CA command (0x6d01), old firmware has no Recover one.
+                    let root = lsdk::scp::RootKey::generate()?;
+                    let mode = if *regular {
+                        lsdk::scp::ScpMode::Default
+                    } else {
+                        lsdk::scp::ScpMode::Recover
+                    };
                     let mut chan =
-                        lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
-                    eprintln!("> confirm removing the custom CA on the device");
-                    chan.reset_custom_ca().await.map_err(ca_hint)?;
+                    lsdk::scp::SecureChannel::open_mode(&d, &root, mode, &mut scp_progress)
+                        .await
+                        .map_err(|e| match e {
+                            Error::Status(sw) if sw.0 == 0x650e && !*regular => Error::App(format!(
+                                "{e}: this firmware has no Recover channel, use `lsdk ca install --regular`"
+                            )),
+                            e => e,
+                        })?;
+                    eprintln!("> confirm installing the CA \"{name}\" on the device");
+                    if *regular {
+                        chan.setup_custom_ca(name, &public).await.map_err(ca_hint)?;
+                    } else {
+                        chan.recover_set_ca(name, &public).await.map_err(ca_hint)?;
+                    }
+                    println!("custom CA \"{name}\" installed: {}", hex::encode(&public));
                 }
-                println!("custom CA removed");
+                CaCmd::Remove {
+                    recover,
+                    name,
+                    key,
+                    public,
+                } => {
+                    let d = open(&cli)?;
+                    let root = lsdk::scp::RootKey::generate()?;
+                    if *recover {
+                        let public = match public {
+                            Some(p) => hex::decode(p.trim_start_matches("0x"))
+                                .map_err(|e| Error::InvalidInput(e.to_string()))?,
+                            None => read_key(&key.clone().unwrap_or_else(default_ca_path))?
+                                .public_key()
+                                .to_vec(),
+                        };
+                        let mut chan = lsdk::scp::SecureChannel::open_mode(
+                            &d,
+                            &root,
+                            lsdk::scp::ScpMode::Recover,
+                            &mut scp_progress,
+                        )
+                        .await?;
+                        eprintln!("> confirm removing the custom CA on the device");
+                        chan.recover_delete_ca(name, &public)
+                            .await
+                            .map_err(ca_hint)?;
+                    } else {
+                        let mut chan =
+                            lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
+                        eprintln!("> confirm removing the custom CA on the device");
+                        chan.reset_custom_ca().await.map_err(ca_hint)?;
+                    }
+                    println!("custom CA removed");
+                }
             }
-        },
+        }
         Cmd::App { cmd } => match cmd {
             AppCmd::Load {
                 file,

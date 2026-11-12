@@ -14,6 +14,8 @@ try {
 const caName = ref('lsdk dev')
 // Removal channel: the CA is installed through the Recover channel.
 const useRecover = ref(true)
+// Install channel: Recover unless the firmware predates it (0x650e).
+const installRegular = ref(false)
 const elf = ref(null) // { name, bytes, info }
 const replace = ref(true)
 const signApp = ref(false)
@@ -79,7 +81,7 @@ async function importFile(e) {
 
 const installCa = () => guard(async () => {
   await run('install custom CA', async (d) => {
-    await d.caInstall(caName.value, caPublic.value, (ev) => {
+    await d.caInstall(caName.value, caPublic.value, installRegular.value, (ev) => {
       scpEvent(ev)
       if (ev.type === 'opened') state.prompt = `Confirm installing the CA "${caName.value}" on the device`
     })
@@ -168,6 +170,7 @@ const delAll = () => guard(async () => {
       <div class="grid cols-2">
         <div><label>CA name (shown by the device)</label><input v-model="caName" maxlength="32" /></div>
         <div style="align-self:end"><label class="check"><input v-model="useRecover" type="checkbox" /> remove through the Recover channel</label></div>
+        <div style="align-self:end"><label class="check"><input v-model="installRegular" type="checkbox" /> install through the regular channel (firmware older than Ledger Recover)</label></div>
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" :disabled="!!state.busy || !caPublic || !recovery" @click="installCa">Install CA</button>

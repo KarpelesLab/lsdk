@@ -174,6 +174,7 @@ install once. With `lsdk`:
 ```sh
 lsdk ca keygen                           # once: CA key in ~/.config/lsdk/ca.key (0600)
 lsdk ca install --name "dev"             # once, with the device in recovery mode (Recover channel)
+lsdk ca install --name "dev" --regular   # firmware older than Ledger Recover (answers 0x650e)
 lsdk app load build/nanos2/bin/app.elf   # after every build (replaces the previous one)
 lsdk app list | lsdk app delete "My App" | lsdk meminfo
 ```

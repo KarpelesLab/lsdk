@@ -996,27 +996,44 @@ impl HwDevice {
 
     // ---- Secure channel (custom CA, sideloading) ----
 
-    /// Install a custom CA (recovery mode) through the Recover channel:
-    /// recent firmware no longer has the regular command (0x6d01).
+    /// Install a custom CA (recovery mode), through the Recover channel unless
+    /// `regular` (recent firmware no longer has the regular command, 0x6d01;
+    /// firmware older than Ledger Recover has no Recover channel, 0x650e).
     #[wasm_bindgen(js_name = caInstall)]
     pub async fn ca_install(
         &self,
         name: String,
         public_key: String,
+        regular: bool,
         on_event: Option<Function>,
     ) -> JsResult<()> {
         let pk = hex::decode(public_key.trim().trim_start_matches("0x"))
             .map_err(|e| js_err(Error::InvalidInput(e.to_string())))?;
         let root = crate::scp::RootKey::generate().map_err(js_err)?;
+        let mode = if regular {
+            crate::scp::ScpMode::Default
+        } else {
+            crate::scp::ScpMode::Recover
+        };
         let mut chan = crate::scp::SecureChannel::open_mode(
             &self.device,
             &root,
-            crate::scp::ScpMode::Recover,
+            mode,
             &mut scp_emitter(&on_event),
         )
         .await
-        .map_err(js_err)?;
-        chan.recover_set_ca(&name, &pk).await.map_err(js_err)
+        .map_err(|e| match e {
+            Error::Status(sw) if sw.0 == 0x650e && !regular => js_err(Error::App(format!(
+                "{e}: this firmware has no Recover channel, use the regular channel"
+            ))),
+            e => js_err(e),
+        })?;
+        if regular {
+            chan.setup_custom_ca(&name, &pk).await
+        } else {
+            chan.recover_set_ca(&name, &pk).await
+        }
+        .map_err(js_err)
     }
 
     /// Remove the custom CA (recovery mode). The Recover channel needs the
