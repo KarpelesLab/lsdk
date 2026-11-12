@@ -149,10 +149,13 @@ lsdk sol transfer --to ... --amount 0.1 --blockhash ...
 ```
 
 > **Vendor endorsement (`endorse setup --vendor`)** runs the vendor HSM's
-> `/endorse` script (as `endorsementSetupLedger2.py` does). As of 2026-11
-> (Stax, SE 1.6.2, `perso_11`, `attest_1`) the HSM still opens the secure
-> channel and has the device create the slot key, but then sends a commit
-> **without a certificate**. lsdk refuses to forward it, because the device
+> `/endorse` script (as `endorsementSetupLedger2.py` does). It did not work
+> as of 2026-11. On a Stax (SE 1.6.2, `perso_11`, `attest_1`) the HSM
+> opened the secure channel and had the device create the slot key, but then
+> sent a commit **without a certificate**. On a Nano S Plus with the latest
+> firmware (SE 1.7.0) it hung up right after the secure channel was allowed,
+> while a genuine check over the same channel worked. lsdk refuses to forward
+> an empty commit, because the device
 > would store the empty certificate and keep the slot unusable until
 > `lsdk endorse reset`. Like every vendor HSM session, it is refused while a
 > custom CA is installed.
