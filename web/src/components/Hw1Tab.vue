@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { state, run, log, errorText, refreshInfo, reconnect } from '../lib/store.js'
+import { state, run, log, errorText, refreshInfo, reconnect, connect } from '../lib/store.js'
 import { Hw1TxSigner } from '../pkg/lsdk.js'
 
 const error = ref(null)
@@ -116,6 +116,103 @@ const finish = () => guard(async () => {
 })
 
 const sat = (n) => `${n} sat (${(n / 1e8).toFixed(8)} BTC)`
+
+// ---- Firmware update (port of the Chrome wallet updater, see btchip_update)
+const upd = reactive({ erase: false, running: false, phase: '', needPick: false, needReplug: false, done: null })
+const bootloader = computed(() => !!state.info?.bootloader)
+const REBOOTS = ['reloadBootloaderFromOs', 'loadBootloaderReloader', 'loadBootloader', 'loadOs']
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+let pickResolve = null
+
+async function waitGone(d, ms) {
+  const until = Date.now() + ms
+  while (d && !d.disconnected && Date.now() < until) await sleep(250)
+}
+
+// Back after a reboot: same USB identity reconnects by itself; the bootloader
+// is a new one the page was never granted: the user must pick it.
+async function waitBack(old, pick) {
+  try {
+    await reconnect({ timeout: pick ? 8000 : 60000, exclude: old })
+    return
+  } catch (e) {
+    if (!pick) throw e
+  }
+  upd.needPick = true
+  await new Promise((resolve) => { pickResolve = resolve })
+  upd.needPick = false
+}
+
+const pickDongle = () => guard(async () => {
+  await connect()
+  pickResolve?.()
+})
+
+// 3 wrong PINs, replugging after each (the dongle halts until then).
+async function eraseDongle() {
+  for (let i = 0; i < 4; i++) {
+    const info = await run('update: check the PIN state', (d) => d.hw1Info(), { retryOnDisconnect: false })
+    if (!info.setUp) { log('ok', 'the dongle is erased'); return }
+    const old = state.device
+    const wrong = String(Math.floor(Math.random() * 100)).padStart(2, '0') // never a valid PIN
+    await run('update: erase (wrong PIN)', (d) => d.hw1VerifyPin(wrong), { retryOnDisconnect: false }).catch(() => {})
+    log('info', `wrong PIN sent (${info.pinAttempts} attempt(s) were left): replug the dongle`)
+    upd.needReplug = true
+    await waitGone(old, 30 * 60000)
+    await reconnect({ timeout: 10 * 60000, exclude: old })
+    upd.needReplug = false
+  }
+  throw new Error('the dongle is still set up after 3 wrong PINs')
+}
+
+const doUpdate = () => guard(async () => {
+  if (!confirm('Update the dongle firmware to 1.0.4? Keep it plugged in, except when asked to replug it.')) return
+  upd.running = true
+  upd.done = null
+  let osLoaded = false
+  try {
+    for (let round = 0; round < 12; round++) {
+      const plan = await run('update: check', (d) => d.hw1UpdatePlan(osLoaded), { retryOnDisconnect: false })
+      log('info', plan.mode === 'bootloader'
+        ? `bootloader ${plan.version}, customer id ${plan.customerId}`
+        : `OS ${plan.version}${plan.setUp ? ', set up' : ''}`)
+      let next = false
+      for (const step of plan.steps) {
+        if (step.step === 'upToDate') { upd.done = 'Already on the latest firmware (1.0.4).'; return }
+        if (step.step === 'erase') {
+          if (!upd.erase) throw new Error('the dongle is set up: updating erases it first. Tick "erase it", with its recovery phrase at hand.')
+          await eraseDongle()
+          next = true
+          break
+        }
+        const old = state.device
+        upd.phase = step.file
+        await run(`update: ${step.file}`, (d) => d.hw1RunStep(step, plan.slow, (i, n) => { state.progress = i / n }), { retryOnDisconnect: false })
+        log('ok', `${step.file} sent`)
+        if (step.step === 'loadOs') osLoaded = true
+        if (step.step === 'initOs') {
+          upd.done = 'Updated to 1.0.4. Set it up again below.'
+          await refreshInfo().catch(() => {})
+          return
+        }
+        if (REBOOTS.includes(step.step)) {
+          log('info', 'the dongle reboots…')
+          await waitGone(old, 15000)
+          await waitBack(old, step.step === 'reloadBootloaderFromOs')
+          next = true
+          break
+        }
+      }
+      if (!next) throw new Error('unexpected update plan')
+    }
+    throw new Error('the update did not finish')
+  } finally {
+    upd.running = false
+    upd.phase = ''
+    upd.needPick = false
+    upd.needReplug = false
+  }
+})
 </script>
 
 <template>
@@ -139,6 +236,29 @@ const sat = (n) => `${n} sat (${(n / 1e8).toFixed(8)} BTC)`
         <div v-if="hw1.pinAttempts !== null">PIN attempts left: <b>{{ hw1.pinAttempts }}</b></div>
         <div v-if="hw1.attestation">Attestation batch {{ hw1.attestation.batchId }}, key {{ hw1.attestation.derivationIndex }}</div>
       </div>
+    </div>
+
+    <div v-if="hw1 || bootloader" class="panel">
+      <h2>Firmware update</h2>
+      <p class="muted small-text" style="margin-top:0">
+        To OS 1.0.4, the last release, with Ledger's signed images (fetched from its Chrome wallet repository, each
+        file checked against a pinned hash) through the dongle's bootloader. The dongle reboots a few times.
+        A dongle set up on a firmware older than 1.1.0 is erased first.
+      </p>
+      <div class="row">
+        <span v-if="hw1">Current: <b>{{ hw1.firmware.version }}</b></span>
+        <span v-else class="badge warn">in bootloader mode</span>
+        <label class="check"><input v-model="upd.erase" type="checkbox" :disabled="upd.running" /> erase it if set up (needs 3 replugs)</label>
+        <div class="spacer"></div>
+        <button class="primary" :disabled="!!state.busy || upd.running" @click="doUpdate">{{ bootloader ? 'Resume update' : 'Update' }}</button>
+      </div>
+      <p v-if="bootloader && !upd.running" class="small-text">Replug the dongle before resuming if anything was sent to it since it rebooted.</p>
+      <div v-if="upd.needReplug" class="confirm-box">Unplug the dongle and plug it back.</div>
+      <div v-if="upd.needPick" class="confirm-box">
+        The dongle rebooted into its bootloader, under a new USB identity:
+        <button class="small primary" @click="pickDongle">Select the dongle</button> and pick it.
+      </div>
+      <p v-if="upd.done" class="ok-text">{{ upd.done }}</p>
     </div>
 
     <div v-if="pending" class="panel confirm">
@@ -230,6 +350,8 @@ const sat = (n) => `${n} sat (${(n / 1e8).toFixed(8)} BTC)`
 
 <style scoped>
 .confirm { border: 2px solid var(--accent); }
+.confirm-box { margin-top: 10px; padding: 10px 12px; border-radius: 8px; border: 2px solid var(--accent); }
+.ok-text { color: var(--ok, inherit); font-weight: 600; }
 .danger-box { border: 1px solid var(--err); border-left-width: 4px; border-radius: 8px; padding: 8px 12px; }
 .wrap { word-break: break-all; }
 textarea { width: 100%; box-sizing: border-box; }

@@ -111,7 +111,13 @@ let lockPoll = null
 export async function refreshInfo() {
   if (!state.device) return
   if (state.device.isLegacy) {
-    // HW.1 / original Nano: no dashboard, see Hw1Tab.
+    // HW.1 / original Nano: no dashboard, see Hw1Tab. In bootloader mode
+    // (0x1807) send nothing: a stray command would leave the bootloader
+    // accepting only load commands until replugged.
+    if (state.device.productId === 0x1807) {
+      state.info = { legacy: true, bootloader: true, model: 'HW.1 / Nano (2014), bootloader' }
+      return
+    }
     state.info = { legacy: true, model: 'HW.1 / Nano (2014)', hw1: await state.device.hw1Info() }
     return
   }

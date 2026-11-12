@@ -128,7 +128,7 @@ pub struct WebHidTransport {
     disconnected: Rc<Cell<bool>>,
     channel: u16,
     /// Legacy BTChip device with bare HID framing (`61xx` replies).
-    plain: bool,
+    plain: Cell<bool>,
 }
 
 impl WebHidTransport {
@@ -206,7 +206,7 @@ impl WebHidTransport {
             rx: Mutex::new(rx),
             on_report,
             on_disconnect,
-            plain,
+            plain: Cell::new(plain),
             disconnected,
             channel: DEFAULT_CHANNEL,
         })
@@ -220,6 +220,12 @@ impl WebHidTransport {
     /// USB product id.
     pub fn product_id(&self) -> u16 {
         self.device.product_id()
+    }
+
+    /// Force the bare HID framing of legacy bootloaders on or off (a 0x3b7c
+    /// dongle uses it in bootloader mode only).
+    pub fn set_plain(&self, plain: bool) {
+        self.plain.set(plain);
     }
 
     /// Legacy BTChip family (HW.1, original Nano): see [`crate::btchip`].
@@ -271,7 +277,8 @@ impl Transport for WebHidTransport {
         while let Ok(p) = rx.try_recv() {
             p?;
         }
-        let packets = if self.plain {
+        let plain_framing = self.plain.get();
+        let packets = if plain_framing {
             framing::encode_plain(apdu, PACKET_SIZE)
         } else {
             framing::encode(self.channel, apdu, PACKET_SIZE)
@@ -292,7 +299,7 @@ impl Transport for WebHidTransport {
         let mut plain = framing::PlainDecoder::new();
         loop {
             let packet = rx.next().await.ok_or(Error::Disconnected)??;
-            let done = if self.plain {
+            let done = if plain_framing {
                 plain.push(&packet)?
             } else {
                 decoder.push(&packet)?

@@ -511,7 +511,7 @@ pub async fn bootloader_info<T: Transport>(device: &Device<T>) -> Result<Bootloa
 
 /// One update step.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(
     feature = "serde",
     serde(rename_all = "camelCase", tag = "step", content = "file")

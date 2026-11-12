@@ -464,6 +464,93 @@ impl HwDevice {
         crate::btchip::message_signature_base64(&der, compressed).map_err(js_err)
     }
 
+    /// HW.1 update: detect the mode (`os` / `bootloader`) and plan the next
+    /// steps: `{mode, version, setUp?, customerId?, slow, steps: [{step, file}]}`.
+    /// In bootloader mode this reads its version, after which it only accepts
+    /// the load commands until replugged: run the planned step right away.
+    #[wasm_bindgen(js_name = hw1UpdatePlan)]
+    pub async fn hw1_update_plan(&self, os_loaded: bool) -> JsResult<JsValue> {
+        use crate::btchip_update as up;
+        let t = self.device.transport();
+        let bootloader = if t.product_id() == 0x1807 {
+            true
+        } else {
+            // 0x3b7c: the OS (channel framing) or a bootloader (plain framing).
+            t.set_plain(false);
+            match crate::btchip::BtchipWallet::new(&self.device)
+                .firmware()
+                .await
+            {
+                Ok(_) | Err(Error::Status(_)) => false,
+                Err(_) => {
+                    t.set_plain(true);
+                    if up::is_bootloader(&self.device).await.map_err(js_err)? {
+                        true
+                    } else {
+                        t.set_plain(false);
+                        return Err(js_err(Error::App(
+                            "the dongle answers neither as an OS nor as a bootloader".into(),
+                        )));
+                    }
+                }
+            }
+        };
+        if bootloader {
+            let info = up::bootloader_info(&self.device).await.map_err(js_err)?;
+            let step = up::plan_bootloader(&info).map_err(js_err)?;
+            return to_js(&serde_json::json!({
+                "mode": "bootloader",
+                "version": up::version_string(info.version),
+                "customerId": format!("{:04x}", info.customer_id),
+                "slow": up::is_slow_bootloader(&info),
+                "steps": [step],
+            }));
+        }
+        let w = crate::btchip::BtchipWallet::new(&self.device);
+        let fw = w.firmware().await.map_err(js_err)?;
+        let set_up = w.operation_mode().await.map_err(js_err)?.is_some();
+        let (a, b, c) = crate::model::parse_version(&fw.version);
+        let steps =
+            up::plan_os((fw.architecture, up::v(a, b, c)), set_up, os_loaded).map_err(js_err)?;
+        to_js(&serde_json::json!({
+            "mode": "os",
+            "version": fw.version,
+            "setUp": set_up,
+            "slow": false,
+            "steps": steps,
+        }))
+    }
+
+    /// HW.1 update: fetch a step's firmware file (pinned hash checked) and send
+    /// it. `onProgress(sent, total)`.
+    #[wasm_bindgen(js_name = hw1RunStep)]
+    pub async fn hw1_run_step(
+        &self,
+        step: JsValue,
+        slow: bool,
+        on_progress: Option<Function>,
+    ) -> JsResult<()> {
+        use crate::btchip_update as up;
+        let step: up::Step = from_js(step)?;
+        let file = step
+            .file()
+            .ok_or_else(|| js_err(Error::InvalidInput("this step has no file".into())))?
+            .to_string();
+        let apdus = up::fetch_script(&file).await.map_err(js_err)?;
+        let mut progress = |i: usize, n: usize| {
+            if let Some(f) = &on_progress {
+                let _ = f.call2(
+                    &JsValue::NULL,
+                    &JsValue::from(i as u32),
+                    &JsValue::from(n as u32),
+                );
+            }
+        };
+        up::run_script(&self.device, &apdus, step.options(slow), &mut progress)
+            .await
+            .map_err(js_err)
+    }
+
     #[wasm_bindgen(getter)]
     pub fn model(&self) -> Option<String> {
         self.device
