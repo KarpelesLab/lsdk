@@ -255,6 +255,9 @@ enum RecoverCmd {
         ca: Option<std::path::PathBuf>,
         backups: Vec<std::path::PathBuf>,
     },
+    /// Rebuild the recovery phrase from 2 or 3 Backup_N.json files, offline
+    /// (no device, no CA, no conf.json). Prints the phrase: run it offline.
+    Combine { backups: Vec<std::path::PathBuf> },
     /// Delete backups (DeleteBackup_N.json files).
     Delete {
         #[arg(short, long, default_value = "conf.json")]
@@ -1002,6 +1005,20 @@ async fn run(cli: Cli) -> Result<()> {
                         .await
                         .map_err(hint)?;
                     println!("seed restored from {} shares", shares.len());
+                }
+                RecoverCmd::Combine { backups } => {
+                    let mut shares = Vec::new();
+                    for p in backups {
+                        let v: std::collections::BTreeMap<String, recover::ShareBackup> =
+                            serde_json::from_value(read_json(p)?)
+                                .map_err(|e| Error::InvalidInput(e.to_string()))?;
+                        shares.extend(v.into_values());
+                    }
+                    let entropy = recover::combine(&shares)?;
+                    eprintln!(
+                        "> shares verified against their commitments; this is your recovery phrase, keep it secret:"
+                    );
+                    println!("{}", recover::bip39_phrase(&entropy)?);
                 }
                 RecoverCmd::Delete { config, ca, files } => {
                     let conf = load_conf(config)?;

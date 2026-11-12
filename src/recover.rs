@@ -231,6 +231,109 @@ pub fn verify_share(
     Ok(s)
 }
 
+// -------------------------------------------------------------- combine --
+
+/// BIP-39 English word list (sha256 2f5eed53…3b24dbda).
+const BIP39_ENGLISH: &str = include_str!("bip39_english.txt");
+
+/// BIP-39 English phrase of `entropy` (16, 20, 24, 28 or 32 bytes).
+pub fn bip39_phrase(entropy: &[u8]) -> Result<String> {
+    if !matches!(entropy.len(), 16 | 20 | 24 | 28 | 32) {
+        return Err(Error::InvalidInput(format!(
+            "BIP-39 entropy must be 16 to 32 bytes, got {}",
+            entropy.len()
+        )));
+    }
+    let words: Vec<&str> = BIP39_ENGLISH.lines().collect();
+    let checksum_bits = entropy.len() / 4;
+    let hash = sha256(entropy);
+    let bit = |i: usize| {
+        let byte = if i < entropy.len() * 8 {
+            entropy[i / 8]
+        } else {
+            hash[(i - entropy.len() * 8) / 8]
+        };
+        (byte >> (7 - i % 8)) & 1
+    };
+    let total = entropy.len() * 8 + checksum_bits;
+    Ok((0..total / 11)
+        .map(|w| {
+            let idx = (0..11).fold(0usize, |acc, b| (acc << 1) | bit(w * 11 + b) as usize);
+            words[idx]
+        })
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+/// Rebuild the seed entropy from at least [`THRESHOLD`] share files
+/// (`Backup_N.json` entries), **without a device**: Lagrange interpolation at
+/// 0 of the first half of each share (`s_i = f(i)`, `f(x) = entropy + a·x mod
+/// N` on secp384r1, per the Recover white paper). Every share is checked
+/// against its commitments first. Returns the entropy; [`bip39_phrase`] turns
+/// it into the recovery phrase.
+pub fn combine(shares: &[ShareBackup]) -> Result<Vec<u8>> {
+    if shares.len() < THRESHOLD {
+        return Err(Error::InvalidInput(format!(
+            "at least {THRESHOLD} shares are needed"
+        )));
+    }
+    let dec =
+        |h: &str| hex::decode(h).map_err(|e| Error::InvalidInput(format!("backup file: {e}")));
+    let n = p384::curve().n;
+    let mut points: Vec<(BigInt, BigInt)> = Vec::new();
+    let first = &shares[0];
+    for b in shares {
+        if b.commitments != first.commitments || b.words_number != first.words_number {
+            return Err(Error::InvalidInput(
+                "the shares come from different backups".into(),
+            ));
+        }
+        let share = dec(&b.share)?;
+        let index_bytes: [u8; 4] = dec(&b.index)?
+            .try_into()
+            .map_err(|_| Error::InvalidInput("backup file: index must be 4 bytes".into()))?;
+        let index = u32::from_le_bytes(index_bytes);
+        verify_share(&dec(&b.point)?, &share, index, &dec(&b.commitments)?)?;
+        let x = BigInt::from(index);
+        if points.iter().any(|(px, _)| *px == x) {
+            return Err(Error::InvalidInput("the same share was given twice".into()));
+        }
+        points.push((x, BigInt::from_bytes_be(Sign::Plus, &share[..p384::LEN])));
+    }
+    // f(0) = sum y_i * prod_{j != i} x_j / (x_j - x_i)   (mod N)
+    let modn = |v: BigInt| ((v % &n) + &n) % &n;
+    let mut secret = BigInt::from(0);
+    for (i, (xi, yi)) in points.iter().enumerate() {
+        let (mut num, mut den) = (BigInt::from(1), BigInt::from(1));
+        for (j, (xj, _)) in points.iter().enumerate() {
+            if i != j {
+                num = modn(num * xj);
+                den = modn(den * (xj - xi));
+            }
+        }
+        let inv = den
+            .modinv(&n)
+            .ok_or_else(|| Error::InvalidInput("degenerate share indexes".into()))?;
+        secret = modn(secret + yi * num * inv);
+    }
+    let len = match first.words_number {
+        12 => 16,
+        18 => 24,
+        _ => 32,
+    };
+    let bytes = secret.to_bytes_be().1;
+    if bytes.len() > len {
+        return Err(Error::App(format!(
+            "the rebuilt secret is {} bytes, more than the {len} bytes of a {}-word phrase",
+            bytes.len(),
+            len * 3 / 4
+        )));
+    }
+    let mut out = vec![0u8; len - bytes.len()];
+    out.extend(bytes);
+    Ok(out)
+}
+
 // --------------------------------------------------------------- config --
 
 /// Identity shown on the device during backup / restore.
@@ -667,6 +770,100 @@ pub async fn delete<T: Transport>(
         on_event(RecoverEvent::ShareVerified { name });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod combine_tests {
+    use super::*;
+
+    #[test]
+    fn bip39_vectors() {
+        let z = |n: usize| vec![0u8; n];
+        assert_eq!(
+            bip39_phrase(&z(16)).unwrap(),
+            format!("{}about", "abandon ".repeat(11))
+        );
+        assert_eq!(
+            bip39_phrase(&z(32)).unwrap(),
+            format!("{}art", "abandon ".repeat(23))
+        );
+        assert_eq!(
+            bip39_phrase(&[0x7f; 16]).unwrap(),
+            "legal winner thank year wave sausage worth useful legal winner thank yellow"
+        );
+        assert_eq!(
+            bip39_phrase(&[0xff; 32]).unwrap(),
+            format!("{}vote", "zoo ".repeat(23))
+        );
+        assert!(bip39_phrase(&z(15)).is_err());
+    }
+
+    /// White paper Q point ("Ledger Recover Auxiliary VSS Point seed").
+    const Q: &str = "fbfc7b98c353a92621854e13d1efbcf1385601a5ce14f5b64eb722ddc52b5690f302663f904679847fc5114dcc7d94ed3b59569d2791c3a8e1bc8c32b5c0e537d1a4a95f0c3b16c493e5d69fec29ead4c95f7ed6b9c561a856a7b83d980f1cd8";
+
+    /// A 2-of-3 Pedersen sharing of `entropy`, as the device would produce it.
+    fn share(entropy: &[u8], words: u8) -> Vec<ShareBackup> {
+        let c = p384::curve();
+        let q_bytes = hex::decode(Q).unwrap();
+        let q = c.point(&q_bytes).unwrap();
+        let big = |h: &str| BigInt::parse_bytes(h.as_bytes(), 16).unwrap();
+        let (e, a) = (
+            BigInt::from_bytes_be(Sign::Plus, entropy),
+            big("1234567890abcdef1234"),
+        );
+        let (t, b) = (big("fedcba9876543210"), big("0badc0ffee"));
+        let commit = |x: &BigInt, y: &BigInt| c.encode(&c.add(&c.mul(x, &c.g), &c.mul(y, &q)));
+        let commitments = [commit(&e, &t), commit(&a, &b)].concat();
+        let pad = |v: BigInt| {
+            let v = ((v % &c.n) + &c.n) % &c.n;
+            let bytes = v.to_bytes_be().1;
+            [vec![0u8; p384::LEN - bytes.len()], bytes].concat()
+        };
+        let base: u32 = 0x1234_5678;
+        (0..3)
+            .map(|k| {
+                let i = BigInt::from(base + k);
+                let s = [pad(&e + &a * &i), pad(&t + &b * &i)].concat();
+                ShareBackup {
+                    share: hex::encode(&s),
+                    index: hex::encode((base + k).to_le_bytes()),
+                    commitments: hex::encode(&commitments),
+                    share_commit: String::new(),
+                    hash: String::new(),
+                    point: Q.into(),
+                    words_number: words,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn combine_any_two_shares() {
+        let entropy: Vec<u8> = (1..=32).collect();
+        let s = share(&entropy, 24);
+        for pair in [[0, 1], [0, 2], [2, 1]] {
+            let two = [s[pair[0]].clone(), s[pair[1]].clone()];
+            assert_eq!(combine(&two).unwrap(), entropy);
+        }
+        assert_eq!(combine(&s).unwrap(), entropy);
+        // Null seed, 24 words.
+        let s = share(&[0u8; 32], 24);
+        let phrase = bip39_phrase(&combine(&s[..2]).unwrap()).unwrap();
+        assert_eq!(phrase, format!("{}art", "abandon ".repeat(23)));
+    }
+
+    #[test]
+    fn combine_rejects_bad_input() {
+        let s = share(&[7u8; 32], 24);
+        assert!(combine(&s[..1]).is_err());
+        assert!(combine(&[s[0].clone(), s[0].clone()]).is_err());
+        let mut bad = s[1].clone();
+        bad.share
+            .replace_range(..2, if &bad.share[..2] == "00" { "01" } else { "00" });
+        assert!(combine(&[s[0].clone(), bad]).is_err());
+        let other = share(&[8u8; 32], 24);
+        assert!(combine(&[s[0].clone(), other[1].clone()]).is_err());
+    }
 }
 
 #[cfg(test)]
