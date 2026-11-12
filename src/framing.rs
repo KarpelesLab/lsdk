@@ -107,6 +107,108 @@ impl Decoder {
     }
 }
 
+/// How a legacy BTChip device (vendor [`crate::LEGACY_VENDOR_ID`]) frames APDUs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegacyFraming {
+    /// Channel framing, like current devices (product ids 0x3b7c, 0x4b7c).
+    Channel,
+    /// Bare HID: the APDU padded to 64-byte reports; replies start with `61 LL`
+    /// when they carry `LL` data bytes (early HW.1, product ids 0x1807, 0x2b7c).
+    Plain,
+}
+
+/// Framing of a legacy BTChip product id, `None` if unknown.
+pub fn legacy_framing(product_id: u16) -> Option<LegacyFraming> {
+    match product_id {
+        0x3b7c | 0x4b7c => Some(LegacyFraming::Channel),
+        0x1807 | 0x2b7c => Some(LegacyFraming::Plain),
+        _ => None,
+    }
+}
+
+/// Split an APDU into bare 64-byte reports ([`LegacyFraming::Plain`]).
+pub fn encode_plain(apdu: &[u8], packet_size: usize) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = apdu.chunks(packet_size).map(<[u8]>::to_vec).collect();
+    if out.is_empty() {
+        out.push(Vec::new());
+    }
+    for p in &mut out {
+        p.resize(packet_size, 0);
+    }
+    out
+}
+
+/// Incremental decoder of [`LegacyFraming::Plain`] replies. Yields the
+/// response as `data || SW`, like [`Decoder`].
+#[derive(Debug, Default)]
+pub struct PlainDecoder {
+    expected: Option<usize>,
+    data: Vec<u8>,
+}
+
+impl PlainDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed one report. Returns `Some(response)` once complete.
+    pub fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
+        if self.expected.is_none() {
+            if packet.len() < 2 {
+                return Err(Error::Framing("packet too short".into()));
+            }
+            if packet[0] != 0x61 {
+                // No data: the report starts with the status word.
+                return Ok(Some(packet[..2].to_vec()));
+            }
+            self.expected = Some(packet[1] as usize + 2);
+            self.data.extend_from_slice(&packet[2..]);
+        } else {
+            self.data.extend_from_slice(packet);
+        }
+        let want = self.expected.unwrap_or(0);
+        if self.data.len() >= want {
+            self.data.truncate(want);
+            Ok(Some(core::mem::take(&mut self.data)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+
+    #[test]
+    fn plain_short_and_long() {
+        let mut d = PlainDecoder::new();
+        assert_eq!(d.push(&[0x90, 0x00, 0, 0]).unwrap(), Some(vec![0x90, 0x00]));
+        // 70 data bytes + SW over two reports.
+        let body: Vec<u8> = (0..70).collect();
+        let mut first = vec![0x61, 70];
+        first.extend_from_slice(&body[..62]);
+        let mut second = body[62..].to_vec();
+        second.extend_from_slice(&[0x90, 0x00]);
+        second.resize(64, 0);
+        let mut d = PlainDecoder::new();
+        assert_eq!(d.push(&first).unwrap(), None);
+        let r = d.push(&second).unwrap().unwrap();
+        assert_eq!(&r[..70], &body[..]);
+        assert_eq!(&r[70..], &[0x90, 0x00]);
+        assert_eq!(
+            encode_plain(&[0xe0, 0xc4, 0, 0, 0], 64),
+            vec![{
+                let mut v = vec![0xe0, 0xc4, 0, 0, 0];
+                v.resize(64, 0);
+                v
+            }]
+        );
+        assert_eq!(legacy_framing(0x3b7c), Some(LegacyFraming::Channel));
+        assert_eq!(legacy_framing(0x1807), Some(LegacyFraming::Plain));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

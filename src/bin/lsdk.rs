@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use lsdk::apps::{btc, eth, sol};
+use lsdk::btchip;
 use lsdk::hsm::HsmEvent;
 use lsdk::manager::Manager;
 use lsdk::path::DerivationPath;
@@ -174,6 +175,75 @@ enum Cmd {
     Sol {
         #[command(subcommand)]
         cmd: SolCmd,
+    },
+    /// Legacy HW.1 / original Nano (BTChip firmware, USB vendor 0x2581).
+    Hw1 {
+        #[command(subcommand)]
+        cmd: Hw1Cmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum Hw1Cmd {
+    /// Firmware, setup state, PIN attempts and attestation.
+    Info,
+    /// First setup of a new or wiped dongle. Without --words the dongle
+    /// generates a seed and types it (as a keyboard) on later power-ups
+    /// until the PIN is entered: have a text editor focused.
+    Setup {
+        /// PIN, 4 to 32 characters (sent in clear: that's how this device works).
+        #[arg(long)]
+        pin: String,
+        /// Restore this BIP-39 phrase instead (test devices: it travels in clear).
+        #[arg(long)]
+        words: Option<String>,
+        /// BIP-39 passphrase for --words.
+        #[arg(long, default_value = "")]
+        passphrase: String,
+        /// Secondary PIN (up to 4 characters) opening a random decoy wallet.
+        #[arg(long)]
+        secondary_pin: Option<String>,
+        /// Bitcoin testnet address versions.
+        #[arg(long)]
+        testnet: bool,
+        /// Required with --words: acknowledges the phrase is sent in clear over USB.
+        #[arg(long)]
+        i_understand_the_seed_travels_over_usb: bool,
+    },
+    /// Public key and Base58 address of a path.
+    Address {
+        #[arg(long, default_value = "44'/0'/0'/0/0")]
+        path: String,
+        #[arg(long)]
+        pin: String,
+    },
+    /// Sign a message (ASCII, up to 140 characters; keyboard confirmation).
+    SignMessage {
+        #[arg(long, default_value = "44'/0'/0'/0/0")]
+        path: String,
+        #[arg(long)]
+        pin: String,
+        message: String,
+    },
+    /// Sign a P2PKH transaction to one address, change back to --change-path.
+    /// Prints the signed transaction (hex); nothing is broadcast.
+    SignTx {
+        #[arg(long)]
+        pin: String,
+        /// Input to spend: RAW_TX_HEX_OR_FILE:VOUT:PATH (repeat for more).
+        #[arg(long = "input", required = true)]
+        inputs: Vec<String>,
+        /// Destination (Base58 address).
+        #[arg(long)]
+        to: String,
+        /// Amount in satoshis.
+        #[arg(long)]
+        amount: u64,
+        /// Fee in satoshis.
+        #[arg(long)]
+        fee: u64,
+        #[arg(long, default_value = "44'/0'/0'/1/0")]
+        change_path: String,
     },
 }
 
@@ -593,6 +663,124 @@ fn open(cli: &Cli) -> Result<Device<HidTransport>> {
     Ok(Device::new(t))
 }
 
+/// Unlock a HW.1 with --pin, refusing to burn the last attempt blindly.
+async fn hw1_unlock(w: &btchip::BtchipWallet<'_, HidTransport>, pin: &str) -> Result<()> {
+    match w.pin_attempts().await? {
+        None => {
+            return Err(Error::App(
+                "the dongle is not set up: run `lsdk hw1 setup` first".into(),
+            ));
+        }
+        Some(n) if n < 3 => {
+            eprintln!("> warning: {n} PIN attempt(s) left before the dongle erases itself")
+        }
+        _ => {}
+    }
+    w.verify_pin(pin).await.map(|_| ())
+}
+
+/// Keyboard confirmation: the user power cycles the dongle, which types a
+/// summary and a code, then plugs it back. Returns the code and the reopened
+/// device.
+fn hw1_confirm(cli: &Cli, c: &btchip::Confirmation) -> Result<(String, Device<HidTransport>)> {
+    if c.kind != 0x01 {
+        return Err(Error::App(format!(
+            "confirmation type 0x{:02x} (security card / secure screen) is not supported, only keyboard confirmation",
+            c.kind
+        )));
+    }
+    eprintln!("> confirmation needed:");
+    eprintln!(
+        "  1. unplug the dongle and open a text editor (ideally on another computer), cursor in it"
+    );
+    eprintln!(
+        "  2. plug the dongle in: it types a summary of the operation and a 4-digit code - check the summary"
+    );
+    eprintln!("  3. plug the dongle back into this computer, then type the code here");
+    eprint!("code: ");
+    let _ = std::io::stderr().flush();
+    let mut code = String::new();
+    std::io::stdin()
+        .read_line(&mut code)
+        .map_err(|e| Error::InvalidInput(e.to_string()))?;
+    let code = code.trim().to_string();
+    if code.is_empty() {
+        return Err(Error::UserRefused);
+    }
+    // Wait for the dongle to be back.
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(d) = open(cli) {
+            return Ok((code, d));
+        }
+        if start.elapsed() > Duration::from_secs(60) {
+            return Err(Error::NoDevice);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// `RAW_TX_HEX_OR_FILE:VOUT:PATH`.
+fn hw1_input(s: &str) -> Result<btchip::SpendInput> {
+    let mut it = s.rsplitn(3, ':');
+    let (path_s, vout, tx_s) = match (it.next(), it.next(), it.next()) {
+        (Some(p), Some(v), Some(t)) => (p, v, t),
+        _ => {
+            return Err(Error::InvalidInput(format!(
+                "input \"{s}\": expected RAW_TX_HEX_OR_FILE:VOUT:PATH"
+            )));
+        }
+    };
+    let raw = match std::fs::read_to_string(tx_s) {
+        Ok(t) => t,
+        Err(_) => tx_s.to_string(),
+    };
+    let raw = hex::decode(raw.trim())
+        .map_err(|e| Error::InvalidInput(format!("input transaction hex: {e}")))?;
+    Ok(btchip::SpendInput {
+        prev_tx: btchip::Tx::parse(&raw)?,
+        vout: vout
+            .parse()
+            .map_err(|_| Error::InvalidInput(format!("bad output index {vout}")))?,
+        path: path(path_s)?,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Hw1Info {
+    family: &'static str,
+    product: Option<String>,
+    firmware: btchip::FirmwareInfo,
+    set_up: bool,
+    operation_mode: Option<u8>,
+    pin_attempts: Option<u8>,
+    attestation: Option<btchip::Attestation>,
+}
+
+async fn hw1_info(d: &Device<HidTransport>) -> Result<Hw1Info> {
+    let w = btchip::BtchipWallet::new(d);
+    let firmware = w.firmware().await?;
+    let operation_mode = w.operation_mode().await?;
+    let pin_attempts = w.pin_attempts().await?;
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|t| t.as_nanos())
+        .unwrap_or(0)
+        ^ u128::from(std::process::id());
+    let mut blob = [0u8; 8];
+    blob.copy_from_slice(&seed.to_le_bytes()[..8]);
+    Ok(Hw1Info {
+        family: "BTChip (HW.1 / Nano 2014)",
+        product: d.transport().info().product.clone(),
+        set_up: operation_mode.is_some(),
+        firmware,
+        operation_mode,
+        pin_attempts,
+        attestation: w.attestation(blob).await.ok(),
+    })
+}
+
 fn path(s: &str) -> Result<DerivationPath> {
     s.parse()
 }
@@ -614,6 +802,10 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::List => print(&HidTransport::list()?),
         Cmd::Info => {
             let d = open(&cli)?;
+            if d.transport().info().legacy {
+                print(&hw1_info(&d).await?);
+                return Ok(());
+            }
             let app = d.get_app_and_version().await.ok();
             if let Some(a) = app.as_ref().filter(|a| !a.is_dashboard()) {
                 print(a);
@@ -1463,6 +1655,135 @@ async fn run(cli: Cli) -> Result<()> {
                         println!("{}", outscript::base64::encode(&signed));
                     } else {
                         println!("{}", hex::encode(btc::psbt::finalize_and_extract(&signed)?));
+                    }
+                }
+            }
+        }
+        Cmd::Hw1 { cmd } => {
+            let d = open(&cli)?;
+            if !d.transport().info().legacy {
+                return Err(Error::InvalidInput(
+                    "not a HW.1 / original Nano (BTChip, USB vendor 0x2581)".into(),
+                ));
+            }
+            let w = btchip::BtchipWallet::new(&d);
+            match cmd {
+                Hw1Cmd::Info => print(&hw1_info(&d).await?),
+                Hw1Cmd::Setup {
+                    pin,
+                    words,
+                    passphrase,
+                    secondary_pin,
+                    testnet,
+                    i_understand_the_seed_travels_over_usb,
+                } => {
+                    if w.operation_mode().await?.is_some() {
+                        return Err(Error::App(
+                            "the dongle is already set up (3 wrong PINs wipe it)".into(),
+                        ));
+                    }
+                    let seed = match words {
+                        Some(phrase) => {
+                            if !i_understand_the_seed_travels_over_usb {
+                                return Err(Error::InvalidInput(
+                                    "--words sends the recovery phrase's seed in clear over USB; pass --i-understand-the-seed-travels-over-usb (test devices only)"
+                                        .into(),
+                                ));
+                            }
+                            Some(btchip::bip39_seed(phrase, passphrase)?.to_vec())
+                        }
+                        None => None,
+                    };
+                    let mut s = btchip::Setup::new(pin.clone(), seed);
+                    s.secondary_pin = secondary_pin.clone();
+                    if *testnet {
+                        s.key_version = 111;
+                        s.p2sh_version = 196;
+                    }
+                    let typed = w.setup(&s).await?;
+                    println!("set up");
+                    if typed || words.is_none() {
+                        eprintln!(
+                            "> the dongle generated a seed: on the next power-ups it types it (as a keyboard) until the PIN is entered; open a text editor before replugging and back it up"
+                        );
+                    }
+                }
+                Hw1Cmd::Address { path: p, pin } => {
+                    hw1_unlock(&w, pin).await?;
+                    print(&w.wallet_public_key(&path(p)?).await?);
+                }
+                Hw1Cmd::SignMessage {
+                    path: p,
+                    pin,
+                    message,
+                } => {
+                    hw1_unlock(&w, pin).await?;
+                    let compressed = w.firmware().await?.compressed_keys;
+                    let path = path(p)?;
+                    let address = w.wallet_public_key(&path).await?.address;
+                    let der = match w.sign_message_prepare(&path, message.as_bytes()).await? {
+                        None => w.sign_message_finish("").await?,
+                        Some(c) => {
+                            let (code, d2) = hw1_confirm(&cli, &c)?;
+                            btchip::BtchipWallet::new(&d2)
+                                .sign_message_finish(&code)
+                                .await?
+                        }
+                    };
+                    print(&serde_json::json!({
+                        "address": address,
+                        "message": message,
+                        "signature": btchip::message_signature_base64(&der, compressed)?,
+                    }));
+                }
+                Hw1Cmd::SignTx {
+                    pin,
+                    inputs,
+                    to,
+                    amount,
+                    fee,
+                    change_path,
+                } => {
+                    let inputs = inputs
+                        .iter()
+                        .map(|s| hw1_input(s))
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut signer = btchip::TxSigner::new(
+                        inputs,
+                        btchip::Payment {
+                            to: to.clone(),
+                            amount: *amount,
+                            fee: *fee,
+                            change_path: path(change_path)?,
+                        },
+                    )?;
+                    let (change, total) = signer.summary();
+                    eprintln!(
+                        "> spending {total} sat: {amount} to {to}, {fee} fee, {change} change to {change_path}"
+                    );
+                    hw1_unlock(&w, pin).await?;
+                    let mut step = signer.step(&w).await?;
+                    let mut reopened;
+                    loop {
+                        match step {
+                            btchip::TxStep::Done(tx) => {
+                                println!("{}", hex::encode(tx));
+                                break;
+                            }
+                            btchip::TxStep::NeedsConfirmation(c) => {
+                                let (code, d2) = hw1_confirm(&cli, &c)?;
+                                reopened = d2;
+                                signer.set_code(code);
+                                let w2 = btchip::BtchipWallet::new(&reopened);
+                                step = match signer.step(&w2).await {
+                                    Err(Error::Status(sw)) if sw.0 == 0x6982 => {
+                                        w2.verify_pin(pin).await?;
+                                        signer.step(&w2).await?
+                                    }
+                                    r => r?,
+                                };
+                            }
+                        }
                     }
                 }
             }

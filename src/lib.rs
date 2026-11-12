@@ -62,6 +62,9 @@ pub mod recover;
 #[cfg(any(feature = "eth", feature = "btc", feature = "sol"))]
 pub mod apps;
 
+#[cfg(feature = "btchip")]
+pub mod btchip;
+
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 
@@ -73,3 +76,7 @@ pub use transport::Transport;
 
 /// USB vendor id used by all devices.
 pub const VENDOR_ID: u16 = 0x2c97;
+
+/// USB vendor id of the legacy BTChip family (HW.1, original Nano), see
+/// [`framing::legacy_framing`].
+pub const LEGACY_VENDOR_ID: u16 = 0x2581;

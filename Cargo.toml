@@ -59,8 +59,10 @@ eth = ["dep:outscript", "outscript/evm", "dep:num-bigint"]
 btc = ["dep:outscript", "outscript/bitcoin", "dep:purecrypto"]
 ## Solana app client (transactions built with outscript)
 sol = ["dep:outscript", "outscript/solana"]
+## Legacy BTChip family (HW.1, original Nano): setup, PIN, addresses, message and P2PKH signing
+btchip = ["dep:purecrypto"]
 ## All app clients
-apps = ["eth", "btc", "sol"]
+apps = ["eth", "btc", "sol", "btchip"]
 ## Everything usable on native targets
 full = ["hid", "manager", "apps", "attestation", "scp", "loader", "recover"]
 ## JS/wasm-bindgen API used by the web UI (wasm32 only)

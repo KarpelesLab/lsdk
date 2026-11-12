@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 
 use hidapi::{HidApi, HidDevice};
 
-use crate::VENDOR_ID;
 use crate::error::{Error, Result};
-use crate::framing::{self, DEFAULT_CHANNEL, PACKET_SIZE};
+use crate::framing::{self, DEFAULT_CHANNEL, LegacyFraming, PACKET_SIZE};
 use crate::model::DeviceModel;
 use crate::transport::Transport;
+use crate::{LEGACY_VENDOR_ID, VENDOR_ID};
 
 /// HID usage page exposed by the devices for APDU exchange.
 pub const USAGE_PAGE: u16 = 0xffa0;
@@ -36,12 +36,16 @@ fn api() -> Result<&'static Mutex<HidApi>> {
 pub struct HidDeviceInfo {
     /// Platform specific path, pass it to [`HidTransport::open`].
     pub path: String,
+    pub vendor_id: u16,
     pub product_id: u16,
     pub model: Option<DeviceModel>,
     pub product: Option<String>,
     pub serial: Option<String>,
     /// Device is in bootloader mode.
     pub bootloader: bool,
+    /// Legacy BTChip family (HW.1, original Nano): no dashboard, speaks the
+    /// BTChip protocol (see [`crate::btchip`]).
+    pub legacy: bool,
 }
 
 enum Backend {
@@ -80,6 +84,8 @@ pub struct HidTransport {
     device: Mutex<Backend>,
     info: HidDeviceInfo,
     channel: u16,
+    /// [`LegacyFraming::Plain`] device (bare HID reports, `61xx` replies).
+    plain: bool,
     timeout: Option<Duration>,
 }
 
@@ -93,7 +99,9 @@ impl HidTransport {
             .map_err(|e| Error::Transport(e.to_string()))?;
         let mut out: Vec<HidDeviceInfo> = Vec::new();
         for d in api.device_list() {
-            if d.vendor_id() != VENDOR_ID {
+            let legacy = d.vendor_id() == LEGACY_VENDOR_ID
+                && framing::legacy_framing(d.product_id()).is_some();
+            if d.vendor_id() != VENDOR_ID && !legacy {
                 continue;
             }
             // Devices expose several interfaces (U2F, ...). Keep the APDU one.
@@ -107,11 +115,15 @@ impl HidTransport {
             let pid = d.product_id();
             out.push(HidDeviceInfo {
                 path,
+                vendor_id: d.vendor_id(),
                 product_id: pid,
-                model: DeviceModel::from_product_id(pid),
+                model: (!legacy)
+                    .then(|| DeviceModel::from_product_id(pid))
+                    .flatten(),
                 product: d.product_string().map(str::to_owned),
                 serial: d.serial_number().map(str::to_owned),
-                bootloader: DeviceModel::is_bootloader_product_id(pid),
+                bootloader: !legacy && DeviceModel::is_bootloader_product_id(pid),
+                legacy,
             });
         }
         Ok(out)
@@ -145,6 +157,7 @@ impl HidTransport {
             device: Mutex::new(device),
             info: info.clone(),
             channel: DEFAULT_CHANNEL,
+            plain: Self::is_plain(info),
             timeout: None,
         })
     }
@@ -157,12 +170,18 @@ impl HidTransport {
         Ok(Self {
             device: Mutex::new(Backend::Usb(super::usbfs::UsbHid::open(
                 &info.path,
+                info.vendor_id,
                 info.product_id,
             )?)),
             info: info.clone(),
             channel: DEFAULT_CHANNEL,
+            plain: Self::is_plain(info),
             timeout: None,
         })
+    }
+
+    fn is_plain(info: &HidDeviceInfo) -> bool {
+        info.legacy && framing::legacy_framing(info.product_id) == Some(LegacyFraming::Plain)
     }
 
     /// Open the first device found.
@@ -241,10 +260,16 @@ impl HidTransport {
             .device
             .lock()
             .map_err(|_| Error::Transport("device mutex poisoned".into()))?;
-        for packet in framing::encode(self.channel, apdu, PACKET_SIZE) {
+        let packets = if self.plain {
+            framing::encode_plain(apdu, PACKET_SIZE)
+        } else {
+            framing::encode(self.channel, apdu, PACKET_SIZE)
+        };
+        for packet in packets {
             dev.write(&packet)?;
         }
         let mut decoder = framing::Decoder::new(self.channel);
+        let mut plain = framing::PlainDecoder::new();
         let start = Instant::now();
         let mut buf = [0u8; PACKET_SIZE + 1];
         loop {
@@ -257,7 +282,12 @@ impl HidTransport {
                 }
                 continue;
             }
-            if let Some(resp) = decoder.push(&buf[..n])? {
+            let done = if self.plain {
+                plain.push(&buf[..n])?
+            } else {
+                decoder.push(&buf[..n])?
+            };
+            if let Some(resp) = done {
                 return Ok(resp);
             }
         }

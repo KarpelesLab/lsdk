@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use rawusb::{Context, DeviceHandle, ErrorKind};
 
-use crate::VENDOR_ID;
 use crate::error::{Error, Result};
 
 pub(crate) struct UsbHid {
@@ -56,8 +55,8 @@ fn locate(hidraw: &str) -> Option<(u8, u8, u8)> {
 
 impl UsbHid {
     /// Open the USB device behind `hidraw` (falling back to the first device
-    /// with this product id when sysfs can't tell).
-    pub fn open(hidraw: &str, product_id: u16) -> Result<Self> {
+    /// with this vendor / product id when sysfs can't tell).
+    pub fn open(hidraw: &str, vendor_id: u16, product_id: u16) -> Result<Self> {
         let ctx = Context::new().map_err(usb_err)?;
         let devices = ctx.devices().map_err(usb_err)?;
         let located = locate(hidraw);
@@ -65,7 +64,7 @@ impl UsbHid {
             .into_iter()
             .find(|d| match located {
                 Some((bus, addr, _)) => d.bus_number() == bus && d.address() == addr,
-                None => d.vendor_id() == VENDOR_ID && d.product_id() == product_id,
+                None => d.vendor_id() == vendor_id && d.product_id() == product_id,
             })
             .ok_or(Error::NoDevice)?;
         let cfg = dev.active_config_descriptor().map_err(usb_err)?;
