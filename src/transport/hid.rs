@@ -105,7 +105,15 @@ impl HidTransport {
                 continue;
             }
             // Devices expose several interfaces (U2F, ...). Keep the APDU one.
-            if !(d.usage_page() == USAGE_PAGE || d.interface_number() == 0) {
+            // A legacy bootloader also exposes a keyboard (usage page 1) as
+            // interface 0: never pick it.
+            let apdu_interface = if legacy {
+                d.usage_page() == USAGE_PAGE
+                    || (d.interface_number() == 0 && d.usage_page() != 0x0001)
+            } else {
+                d.usage_page() == USAGE_PAGE || d.interface_number() == 0
+            };
+            if !apdu_interface {
                 continue;
             }
             let path = d.path().to_string_lossy().into_owned();

@@ -768,22 +768,35 @@ async fn hw1_open_any(cli: &Cli, wait: Duration) -> Result<(Device<HidTransport>
         Some(LegacyFraming::Plain) => Ok((open(true, 10)?, false)),
         _ => {
             // 0x3b7c: the OS (channel framing) or a bootloader (plain framing).
-            {
-                let d = open(false, 2)?;
-                if btchip::BtchipWallet::new(&d).firmware().await.is_ok() {
-                    drop(d);
-                    return Ok((open(false, 10)?, false));
+            // Retried: a dongle that just enumerated may not answer yet.
+            let mut last = String::new();
+            for _ in 0..4 {
+                let os = {
+                    let d = open(false, 2)?;
+                    // Any status (even 0x6faa, halted) means the OS framing works.
+                    match btchip::BtchipWallet::new(&d).firmware().await {
+                        Ok(_) | Err(Error::Status(_)) => {
+                            drop(d);
+                            return Ok((open(false, 10)?, false));
+                        }
+                        Err(e) => e,
+                    }
+                };
+                let d = open(true, 2)?;
+                match lsdk::btchip_update::is_bootloader(&d).await {
+                    Ok(true) => {
+                        drop(d);
+                        return Ok((open(true, 10)?, true));
+                    }
+                    Ok(false) => last = format!("OS probe: {os}; bootloader probe: OS reply"),
+                    Err(e) => last = format!("OS probe: {os}; bootloader probe: {e}"),
                 }
-            }
-            let d = open(true, 2)?;
-            if lsdk::btchip_update::is_bootloader(&d).await? {
                 drop(d);
-                Ok((open(true, 10)?, true))
-            } else {
-                Err(Error::App(
-                    "the dongle answers neither as an OS nor as a bootloader".into(),
-                ))
+                std::thread::sleep(Duration::from_millis(700));
             }
+            Err(Error::App(format!(
+                "the dongle answers neither as an OS nor as a bootloader ({last})"
+            )))
         }
     }
 }
@@ -816,15 +829,37 @@ async fn hw1_script(dir: &Option<std::path::PathBuf>, name: &str) -> Result<Vec<
     }
 }
 
-/// Erase a set-up dongle with wrong PINs (it erases itself after 3).
+/// Erase a set-up dongle with wrong PINs (it erases itself after 3). After
+/// each wrong PIN the dongle answers 0x6faa (halted) until it is replugged.
 async fn hw1_erase(cli: &Cli) -> Result<()> {
+    let mut asked = false;
+    let start = std::time::Instant::now();
     loop {
-        let (d, bootloader) = hw1_open_any(cli, Duration::from_secs(120)).await?;
+        if start.elapsed() > Duration::from_secs(30 * 60) {
+            return Err(Error::Timeout);
+        }
+        let (d, bootloader) = match hw1_open_any(cli, Duration::from_secs(5)).await {
+            Ok(x) => x,
+            Err(Error::NoDevice) => continue,
+            Err(e) => return Err(e),
+        };
         if bootloader {
             return Ok(());
         }
         let w = btchip::BtchipWallet::new(&d);
-        let Some(left) = w.pin_attempts().await? else {
+        let left = match w.pin_attempts().await {
+            Err(Error::Timeout) | Err(Error::Status(lsdk::StatusWord(0x6faa))) => {
+                if !asked {
+                    eprintln!("> unplug the dongle and plug it back");
+                    asked = true;
+                }
+                drop(d);
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            r => r?,
+        };
+        let Some(left) = left else {
             eprintln!("> the dongle is erased");
             return Ok(());
         };
@@ -835,12 +870,8 @@ async fn hw1_erase(cli: &Cli) -> Result<()> {
             .unwrap_or(0)
             % 100;
         let _ = w.verify_pin(&format!("{n:02}")).await;
-        drop(d);
-        eprintln!(
-            "> wrong PIN sent ({} attempt(s) were left): unplug the dongle and plug it back",
-            left
-        );
-        hw1_wait_gone(cli, Duration::from_secs(300))?;
+        eprintln!("> wrong PIN sent ({left} attempt(s) were left)");
+        asked = false;
     }
 }
 
@@ -867,9 +898,28 @@ async fn hw1_update(
             (vec![plan_bootloader(&info)?], is_slow_bootloader(&info))
         } else {
             let w = btchip::BtchipWallet::new(&d);
-            let fw = w.firmware().await?;
+            let halted = |e: &Error| matches!(e, Error::Status(sw) if sw.0 == 0x6faa);
+            let (fw, set_up) = match async {
+                let fw = w.firmware().await?;
+                let set_up = w.operation_mode().await?.is_some();
+                Ok::<_, Error>((fw, set_up))
+            }
+            .await
+            {
+                // Halted after a wrong PIN: an erase in progress.
+                Err(e) if halted(&e) && erase && !dry_run => {
+                    drop(d);
+                    hw1_erase(cli).await?;
+                    continue;
+                }
+                Err(e) if halted(&e) => {
+                    return Err(Error::App(
+                        "the dongle is halted after a wrong PIN: unplug it and plug it back".into(),
+                    ));
+                }
+                r => r?,
+            };
             let (a, b, c) = lsdk::model::parse_version(&fw.version);
-            let set_up = w.operation_mode().await?.is_some();
             eprintln!(
                 "> OS {} (architecture 0x{:02x}), {}",
                 fw.version,
@@ -893,7 +943,11 @@ async fn hw1_update(
                     None => eprintln!("> {s:?}"),
                 }
             }
-            if steps.iter().any(Step::reboots) {
+            if bootloader {
+                eprintln!(
+                    "> note: the bootloader now only accepts the load commands; replug the dongle before running the update"
+                );
+            } else if steps.iter().any(Step::reboots) {
                 eprintln!(
                     "> then, after the reboot into the bootloader: the bootloader reloader, bootloader or OS image matching its customer id"
                 );

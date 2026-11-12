@@ -483,7 +483,9 @@ fn ok(raw: Vec<u8>) -> Result<Vec<u8>> {
     }
 }
 
-/// Customer id and version of the bootloader.
+/// Customer id and version of the bootloader. Afterwards the bootloader only
+/// accepts the `E0` load commands until it is power cycled: read this once,
+/// then load in the same session.
 pub async fn bootloader_info<T: Transport>(device: &Device<T>) -> Result<BootloaderInfo> {
     let id = ok(device.exchange_raw(&[0xf0, 0x01, 0x01, 0x00, 0x00]).await?)?;
     if id.len() < 2 {

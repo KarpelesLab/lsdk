@@ -234,6 +234,18 @@ lsdk hw1 sign-tx --pin 1234 --input PREV_TX_HEX_OR_FILE:VOUT:PATH --to 1... --am
 `sign-tx` prints the signed transaction; nothing is broadcast. The web console
 shows a dedicated HW.1 view when one is connected.
 
+```sh
+lsdk hw1 update --dry-run          # read the dongle, fetch and check the files
+lsdk hw1 update --erase            # update to OS 1.0.4 (erases a set-up dongle first)
+```
+
+The update replays Ledger's signed images from its Chrome wallet repository
+(pinned commit, each file checked against a pinned SHA-256) through the
+dongle's bootloader, rebooting a few times. A dongle set up on a firmware
+older than 1.1.0 is erased first with wrong PINs: replug it when asked. After a
+dry run in bootloader mode, replug the dongle before updating (reading the
+bootloader version leaves it accepting only the load commands).
+
 ### Linux: udev rules
 
 On Linux the device node is root-only by default; both the CLI and the
