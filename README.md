@@ -45,7 +45,8 @@ It needs a Chromium based browser (WebHID).
 Tabs: **Device** (info, genuine check, rename, battery), **Apps** (installed
 apps, catalog, install / update / uninstall), **Firmware** (check and update),
 **Advanced** (EVM, Bitcoin and Solana: addresses, build + sign + broadcast
-transactions, message signing, PSBT signing; raw APDU console).
+transactions, message signing, PSBT signing; raw APDU console; host onboarding
+with known test phrases, for test devices only).
 
 ```sh
 cd web

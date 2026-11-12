@@ -760,6 +760,34 @@ impl HwDevice {
     /// Vendor endorsement of slot 1 or 2: the HSM has the device create the
     /// slot key and certifies it with the vendor's endorsement owner key.
     /// Returns the slot info afterwards.
+    /// Host onboarding (test devices only: **the PIN and phrase travel in
+    /// clear over USB**). The device must be wiped and in recovery mode.
+    /// `identity`: main, alternate or temporary. Takes minutes on some models.
+    #[wasm_bindgen(js_name = onboard)]
+    pub async fn onboard(
+        &self,
+        identity: String,
+        pin: String,
+        words: String,
+        passphrase: String,
+    ) -> JsResult<()> {
+        use crate::os::OnboardIdentity;
+        let id = match identity.as_str() {
+            "main" => OnboardIdentity::Main,
+            "alternate" => OnboardIdentity::Alternate,
+            "temporary" => OnboardIdentity::Temporary,
+            _ => {
+                return Err(js_err(Error::InvalidInput(
+                    "identity: main, alternate or temporary".into(),
+                )));
+            }
+        };
+        self.device
+            .onboard(id, &pin, "", &passphrase, words.trim())
+            .await
+            .map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = endorseVendor)]
     pub async fn endorse_vendor(&self, slot: u8, on_event: Option<Function>) -> JsResult<JsValue> {
         let slot = endorsement_slot(slot)?;

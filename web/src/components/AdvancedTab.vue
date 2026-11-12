@@ -10,6 +10,7 @@ import DeveloperPanel from './advanced/DeveloperPanel.vue'
 import EndorsementPanel from './advanced/EndorsementPanel.vue'
 import FactoryPanel from './advanced/FactoryPanel.vue'
 import RecoverPanel from './advanced/RecoverPanel.vue'
+import OnboardPanel from './advanced/OnboardPanel.vue'
 
 const panels = [
   { id: 'eth', label: 'Ethereum / EVM', comp: EthPanel },
@@ -18,15 +19,17 @@ const panels = [
   { id: 'developer', label: 'Developer', comp: DeveloperPanel },
   { id: 'screensaver', label: 'Screensaver', comp: ScreensaverPanel },
   { id: 'recover', label: 'Seed backup', comp: RecoverPanel },
+  { id: 'onboard', label: 'Test onboarding', comp: OnboardPanel },
   { id: 'endorsement', label: 'Endorsement', comp: EndorsementPanel },
   { id: 'factory', label: 'Factory', comp: FactoryPanel },
   { id: 'apdu', label: 'Raw APDU', comp: ApduPanel },
 ]
 const sel = ref('eth')
-// In recovery mode, the screensaver is what can be done here.
+// In recovery mode, the screensaver is what can be done here (or host
+// onboarding, on a wiped device).
 watch(
-  () => state.info?.version?.flags?.isInRecoveryMode,
-  (rec) => { if (rec) sel.value = 'screensaver' },
+  () => [state.info?.version?.flags?.isInRecoveryMode, state.info?.version?.flags?.isOnboarded],
+  ([rec, onboarded]) => { if (rec) sel.value = onboarded === false ? 'onboard' : 'screensaver' },
   { immediate: true },
 )
 </script>

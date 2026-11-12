@@ -881,7 +881,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             };
             eprintln!(
-                "> confirm on the device, then enter your PIN; keep it plugged in while it processes"
+                "> onboarding (no confirmation on a wiped device); it can take a few minutes: keep it plugged in"
             );
             match open(&cli)?
                 .onboard(id, pin, prefix, passphrase, words)
