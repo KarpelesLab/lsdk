@@ -168,7 +168,7 @@ install once. With `lsdk`:
 
 ```sh
 lsdk ca keygen                           # once: CA key in ~/.config/lsdk/ca.key (0600)
-lsdk ca install --name "dev"             # once, with the device in recovery mode
+lsdk ca install --name "dev"             # once, with the device in recovery mode (Recover channel)
 lsdk app load build/nanos2/bin/app.elf   # after every build (replaces the previous one)
 lsdk app list | lsdk app delete "My App" | lsdk meminfo
 ```
@@ -181,7 +181,8 @@ Intel HEX files work too, with `--name`, `--flags`, `--api-level`,
 `--data-size` and `--install-params-size`.
 
 Recovery mode: hold the right button while plugging in (Nano S Plus) or
-powering on (Nano X). `lsdk ca remove` deletes the CA.
+powering on (Nano X). `lsdk ca remove --recover --name "dev"` deletes the CA
+(name and key must match the installed CA).
 
 ### Self-hosted seed backup (Recover protocol)
 
@@ -190,7 +191,7 @@ for backup providers certified by a CA. With your own CA, you are the backup
 service:
 
 ```sh
-lsdk ca install --recover --name "backup CA"   # recovery mode; CA through the Recover channel
+lsdk ca install --name "backup CA"             # recovery mode
 lsdk recover init --first-name John --last-name Doe --birth "1 January 1980"   # conf.json
 lsdk recover backup -c conf.json -o shares/    # Backup_N.json + DeleteBackup_N.json
 lsdk recover restore -c conf.json shares/Backup_1.json shares/Backup_2.json   # device: restore from backup

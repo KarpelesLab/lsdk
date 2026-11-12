@@ -307,9 +307,6 @@ enum CaCmd {
         /// Install this public key (hex) instead of the key file's.
         #[arg(long)]
         public: Option<String>,
-        /// Use the Recover secure channel (for firmware without the regular command).
-        #[arg(long)]
-        recover: bool,
     },
     /// Remove the custom CA from the device (recovery mode, confirmed on device).
     Remove {
@@ -931,7 +928,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let hint = |e: Error| match e {
                 Error::Status(sw) if (sw.0 >> 8) == 0x55 || sw.0 == 0x6982 => Error::App(format!(
-                    "{e}: is the CA installed through the Recover channel? (lsdk ca install --recover, in recovery mode)"
+                    "{e}: is the CA installed? (lsdk ca install, in recovery mode)"
                 )),
                 e => e,
             };
@@ -1061,12 +1058,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let k = read_key(&key.clone().unwrap_or_else(default_ca_path))?;
                 println!("{}", hex::encode(k.public_key()));
             }
-            CaCmd::Install {
-                name,
-                key,
-                public,
-                recover,
-            } => {
+            CaCmd::Install { name, key, public } => {
                 let public = match public {
                     Some(p) => hex::decode(p.trim_start_matches("0x"))
                         .map_err(|e| Error::InvalidInput(e.to_string()))?,
@@ -1075,21 +1067,19 @@ async fn run(cli: Cli) -> Result<()> {
                         .to_vec(),
                 };
                 let d = open(&cli)?;
-                // Any root key works here: the device asks to allow it.
+                // Any root key works here: the device asks to allow it. The
+                // Recover channel is used because recent firmware no longer
+                // has the regular CA command (0x6d01).
                 let root = lsdk::scp::RootKey::generate()?;
-                let mode = if *recover {
-                    lsdk::scp::ScpMode::Recover
-                } else {
-                    lsdk::scp::ScpMode::Default
-                };
-                let mut chan =
-                    lsdk::scp::SecureChannel::open_mode(&d, &root, mode, &mut scp_progress).await?;
+                let mut chan = lsdk::scp::SecureChannel::open_mode(
+                    &d,
+                    &root,
+                    lsdk::scp::ScpMode::Recover,
+                    &mut scp_progress,
+                )
+                .await?;
                 eprintln!("> confirm installing the CA \"{name}\" on the device");
-                if *recover {
-                    chan.recover_set_ca(name, &public).await.map_err(ca_hint)?;
-                } else {
-                    chan.setup_custom_ca(name, &public).await.map_err(ca_hint)?;
-                }
+                chan.recover_set_ca(name, &public).await.map_err(ca_hint)?;
                 println!("custom CA \"{name}\" installed: {}", hex::encode(&public));
             }
             CaCmd::Remove {

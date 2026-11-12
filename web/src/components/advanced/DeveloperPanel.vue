@@ -12,7 +12,8 @@ try {
   remember.value = !!caKey.value
 } catch { /* storage unavailable */ }
 const caName = ref('lsdk dev')
-const useRecover = ref(false)
+// Removal channel: the CA is installed through the Recover channel.
+const useRecover = ref(true)
 const elf = ref(null) // { name, bytes, info }
 const replace = ref(true)
 const signApp = ref(false)
@@ -78,7 +79,7 @@ async function importFile(e) {
 
 const installCa = () => guard(async () => {
   await run('install custom CA', async (d) => {
-    await d.caInstall(caName.value, caPublic.value, useRecover.value, (ev) => {
+    await d.caInstall(caName.value, caPublic.value, (ev) => {
       scpEvent(ev)
       if (ev.type === 'opened') state.prompt = `Confirm installing the CA "${caName.value}" on the device`
     })
@@ -166,7 +167,7 @@ const delAll = () => guard(async () => {
       <p v-if="!recovery" class="muted small-text">Installing or removing the CA requires recovery mode (hold the right button while plugging in / powering on).</p>
       <div class="grid cols-2">
         <div><label>CA name (shown by the device)</label><input v-model="caName" maxlength="32" /></div>
-        <div style="align-self:end"><label class="check"><input v-model="useRecover" type="checkbox" /> use the Recover channel</label></div>
+        <div style="align-self:end"><label class="check"><input v-model="useRecover" type="checkbox" /> remove through the Recover channel</label></div>
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" :disabled="!!state.busy || !caPublic || !recovery" @click="installCa">Install CA</button>

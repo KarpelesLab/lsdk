@@ -772,37 +772,27 @@ impl HwDevice {
 
     // ---- Secure channel (custom CA, sideloading) ----
 
-    /// Install a custom CA (recovery mode). `recover` uses the Recover channel.
+    /// Install a custom CA (recovery mode) through the Recover channel:
+    /// recent firmware no longer has the regular command (0x6d01).
     #[wasm_bindgen(js_name = caInstall)]
     pub async fn ca_install(
         &self,
         name: String,
         public_key: String,
-        recover: bool,
         on_event: Option<Function>,
     ) -> JsResult<()> {
         let pk = hex::decode(public_key.trim().trim_start_matches("0x"))
             .map_err(|e| js_err(Error::InvalidInput(e.to_string())))?;
         let root = crate::scp::RootKey::generate().map_err(js_err)?;
-        let mode = if recover {
-            crate::scp::ScpMode::Recover
-        } else {
-            crate::scp::ScpMode::Default
-        };
         let mut chan = crate::scp::SecureChannel::open_mode(
             &self.device,
             &root,
-            mode,
+            crate::scp::ScpMode::Recover,
             &mut scp_emitter(&on_event),
         )
         .await
         .map_err(js_err)?;
-        if recover {
-            chan.recover_set_ca(&name, &pk).await
-        } else {
-            chan.setup_custom_ca(&name, &pk).await
-        }
-        .map_err(js_err)
+        chan.recover_set_ca(&name, &pk).await.map_err(js_err)
     }
 
     /// Remove the custom CA (recovery mode). The Recover channel needs the
