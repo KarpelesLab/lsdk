@@ -556,27 +556,76 @@ impl OsVersion {
     }
 }
 
-/// Parsed secure element flags.
+/// Parsed secure element flags (`seFlags`, 4 bytes of `GET_VERSION`).
+///
+/// ```text
+/// byte 0: 0x80 PIN validated        0x08 secure channel allowed
+///         0x40 MCU serial number    0x04 onboarded
+///         0x20 valid certificate    0x02 MCU code signed
+///         0x10 custom CA allowed    0x01 recovery mode
+/// byte 1: 0x01 endorsement slot 1   0x02 endorsement slot 2
+/// byte 2: bits 6-5 seed words (0=24, 1=18, 2=12), bits 4-0 current word index
+/// byte 3: onboarding step shown on the device (see [`onboarding_step_name`])
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct SeFlags {
+    /// Byte 0, 0x80: the PIN was entered since boot.
     pub is_pin_validated: bool,
+    /// Byte 0, 0x40.
     pub has_mcu_serial_number: bool,
+    /// Byte 0, 0x20: device certificate present and valid (genuine check possible).
     pub has_valid_certificate: bool,
+    /// Byte 0, 0x10: a custom CA is installed and allowed to connect.
     pub is_custom_authority_connection_allowed: bool,
-    /// The user already allowed the secure channel ("allow manager") since boot.
+    /// Byte 0, 0x08: the user already allowed the secure channel ("allow manager") since boot.
     pub is_secure_connection_allowed: bool,
+    /// Byte 0, 0x04: a seed is set.
     pub is_onboarded: bool,
+    /// Byte 0, 0x02.
     pub is_mcu_code_signed: bool,
+    /// Byte 0, 0x01: booted in recovery mode.
     pub is_in_recovery_mode: bool,
+    /// Byte 1, 0x01.
     pub has_endorsement_slot1: bool,
+    /// Byte 1, 0x02.
     pub has_endorsement_slot2: bool,
-    /// Number of seed words (12/18/24), when known.
+    /// Byte 2, bits 6-5: number of seed words (12/18/24), when known.
     pub seed_word_count: Option<u8>,
+    /// Byte 2, bits 4-0: word being written / restored during onboarding.
     pub current_word_index: u8,
-    /// Raw onboarding state byte.
+    /// Byte 3: raw onboarding step.
     pub onboarding_state: u8,
+    /// Byte 3 by name (see [`onboarding_step_name`]).
+    pub onboarding_step: &'static str,
+}
+
+/// Name of an onboarding step (`seFlags` byte 3), as in Ledger's device SDK.
+/// The step is only meaningful while not onboarded: an onboarded device
+/// reports `0x00` (welcome screen 1) after a reboot, named `ready` here.
+pub fn onboarding_step_name(step: u8, is_onboarded: bool) -> &'static str {
+    match step {
+        0x00 if is_onboarded => "ready",
+        0x00 => "welcomeScreen1",
+        0x01 => "welcomeScreen2",
+        0x02 => "welcomeScreen3",
+        0x03 => "welcomeScreen4",
+        0x04 => "welcomeScreenReminder",
+        0x05 => "setupChoice",
+        0x06 => "pin",
+        0x07 => "newDevice",
+        0x08 => "newDeviceConfirming",
+        0x09 => "restoreSeed",
+        0x0a => "safetyWarning",
+        0x0b => "ready",
+        0x0c => "chooseName",
+        0x0d => "recoverRestore",
+        0x0e => "setupChoiceRestore",
+        0x0f => "onboardingEarlyCheck",
+        0x10 => "restoreWithRecoveryKey",
+        _ => "unknown",
+    }
 }
 
 impl SeFlags {
@@ -586,13 +635,14 @@ impl SeFlags {
         f[..n].copy_from_slice(&flags[..n]);
         let bit = |b: u8, n: u8| (b >> (8 - n)) & 1 == 1;
         let words = (f[2] >> 5) & 0x03;
+        let is_onboarded = bit(f[0], 6);
         SeFlags {
             is_pin_validated: bit(f[0], 1),
             has_mcu_serial_number: bit(f[0], 2),
             has_valid_certificate: bit(f[0], 3),
             is_custom_authority_connection_allowed: bit(f[0], 4),
             is_secure_connection_allowed: bit(f[0], 5),
-            is_onboarded: bit(f[0], 6),
+            is_onboarded,
             is_mcu_code_signed: bit(f[0], 7),
             is_in_recovery_mode: bit(f[0], 8),
             has_endorsement_slot1: f[1] & 1 != 0,
@@ -600,6 +650,7 @@ impl SeFlags {
             seed_word_count: [Some(24), Some(18), Some(12), None][words as usize],
             current_word_index: f[2] & 0x1f,
             onboarding_state: f[3],
+            onboarding_step: onboarding_step_name(f[3], is_onboarded),
         }
     }
 }
@@ -735,6 +786,27 @@ mod tests {
         assert!(v.flags.is_secure_connection_allowed);
         assert!(!v.is_bootloader);
         assert_eq!(v.recover_state, None);
+    }
+
+    #[test]
+    fn se_flags() {
+        // Stax: not onboarded, recovery mode, 24 words, PIN step.
+        let f = SeFlags::parse(&[0x63, 0x00, 0x00, 0x06]);
+        assert!(f.has_mcu_serial_number && f.has_valid_certificate);
+        assert!(f.is_mcu_code_signed && f.is_in_recovery_mode);
+        assert!(!f.is_onboarded && !f.is_pin_validated);
+        assert_eq!(f.seed_word_count, Some(24));
+        assert_eq!(f.onboarding_step, "pin");
+        // Onboarded, unlocked, 12 words; step 0 after reboot means ready.
+        let f = SeFlags::parse(&[0xe6, 0x03, 0x40, 0x00]);
+        assert!(f.is_pin_validated && f.is_onboarded);
+        assert!(f.has_endorsement_slot1 && f.has_endorsement_slot2);
+        assert_eq!(f.seed_word_count, Some(12));
+        assert_eq!(f.onboarding_step, "ready");
+        assert_eq!(
+            SeFlags::parse(&[0x62, 0, 0, 0]).onboarding_step,
+            "welcomeScreen1"
+        );
     }
 
     #[test]
