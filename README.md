@@ -184,7 +184,9 @@ version, flags, API level, target id, NVRAM and install parameters sizes): no
 manifest, no Python. The app's API level must match the firmware's (e.g.
 API level 27 for Nano S Plus 1.7.0); `--dry-run` shows what would be sent.
 Intel HEX files work too, with `--name`, `--flags`, `--api-level`,
-`--data-size` and `--install-params-size`.
+`--data-size` and `--install-params-size`. Firmware older than API levels (e.g.
+Nano S Plus 1.0.x, which answers 0x6512) needs `--legacy-layout`: CREATE APP
+without the API level byte.
 
 Recovery mode: hold the right button while plugging in (Nano S Plus) or
 powering on (Nano X). `lsdk ca remove --recover --name "dev"` deletes the CA

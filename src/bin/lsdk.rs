@@ -446,6 +446,10 @@ enum AppCmd {
         /// HEX input: install parameters size.
         #[arg(long)]
         install_params_size: Option<u32>,
+        /// Old CREATE APP layout, without the API level byte: firmware older
+        /// than API levels (e.g. Nano S Plus 1.0.x, which answers 0x6512).
+        #[arg(long)]
+        legacy_layout: bool,
     },
     /// Delete an app by name (or --hash).
     Delete {
@@ -1637,6 +1641,7 @@ async fn run(cli: Cli) -> Result<()> {
                 api_level,
                 data_size,
                 install_params_size,
+                legacy_layout,
             } => {
                 let raw = std::fs::read(file)
                     .map_err(|e| Error::InvalidInput(format!("{}: {e}", file.display())))?;
@@ -1660,6 +1665,9 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 if let Some(v) = install_params_size {
                     img.install_params_size = *v;
+                }
+                if *legacy_layout {
+                    img.api_level = None;
                 }
                 eprintln!(
                     "{} {} (flags 0x{:x}, api {:?}, {} bytes, target {})",
@@ -1703,12 +1711,9 @@ async fn run(cli: Cli) -> Result<()> {
                 })
                 .await
                 .map_err(|e| match e {
-                    Error::Status(sw) if sw.0 == 0x6a80 || sw.0 == 0x6a81 => {
-                        Error::App(format!("{e}: an app with this name is already installed"))
-                    }
-                    Error::Status(sw) if sw.0 == 0x6a84 || sw.0 == 0x6a85 => {
-                        Error::App(format!("{e}: not enough space"))
-                    }
+                    Error::Status(sw) if sw.0 == 0x6512 && !*legacy_layout => Error::App(format!(
+                        "{e}: CREATE APP has the wrong layout for this firmware; if it predates API levels (e.g. Nano S Plus 1.0.x), retry with --legacy-layout"
+                    )),
                     e => e,
                 })?;
                 println!("installed {}", img.name);

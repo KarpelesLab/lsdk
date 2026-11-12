@@ -16,6 +16,8 @@ const caName = ref('lsdk dev')
 const useRecover = ref(true)
 // Install channel: Recover unless the firmware predates it (0x650e).
 const installRegular = ref(false)
+// CREATE APP without the API level byte (firmware older than API levels).
+const legacyLayout = ref(false)
 const elf = ref(null) // { name, bytes, info }
 const replace = ref(true)
 const signApp = ref(false)
@@ -116,7 +118,7 @@ const targetMismatch = computed(() => elf.value?.info?.targetId && deviceTarget.
 
 const sideload = () => guard(async () => {
   loading.value = null
-  await run(`sideload ${elf.value.info.name}`, (d) => d.sideload(elf.value.bytes, caKey.value.trim(), replace.value, scpEvent, signApp.value))
+  await run(`sideload ${elf.value.info.name}`, (d) => d.sideload(elf.value.bytes, caKey.value.trim(), replace.value, scpEvent, signApp.value, legacyLayout.value))
   log('ok', `${elf.value.info.name} installed`)
   loading.value = null
 })
@@ -195,6 +197,7 @@ const delAll = () => guard(async () => {
       <div class="row" style="margin-top:10px">
         <label class="check"><input v-model="replace" type="checkbox" /> replace an app with the same name</label>
         <label class="check"><input v-model="signApp" type="checkbox" /> sign the app hash with the CA key</label>
+        <label class="check"><input v-model="legacyLayout" type="checkbox" /> legacy layout (firmware older than API levels, e.g. Nano S Plus 1.0.x)</label>
         <div class="spacer"></div>
         <button class="primary" :disabled="!!state.busy || !elf || !caPublic || targetMismatch" @click="sideload">Install</button>
       </div>

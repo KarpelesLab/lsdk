@@ -1141,8 +1141,14 @@ impl HwDevice {
         replace: bool,
         on_event: Option<Function>,
         sign: Option<bool>,
+        legacy_layout: Option<bool>,
     ) -> JsResult<()> {
-        let img = crate::loader::AppImage::from_elf(&elf).map_err(js_err)?;
+        let mut img = crate::loader::AppImage::from_elf(&elf).map_err(js_err)?;
+        // Old CREATE APP layout, without the API level byte (firmware older
+        // than API levels, e.g. Nano S Plus 1.0.x: 0x6512 otherwise).
+        if legacy_layout.unwrap_or(false) {
+            img.api_level = None;
+        }
         let root = crate::scp::RootKey::from_hex(&ca_key).map_err(js_err)?;
         let mut chan =
             crate::scp::SecureChannel::open(&self.device, &root, &mut scp_emitter(&on_event))
