@@ -225,6 +225,13 @@ fn check(url: &str, resp: &rsurl::aio::Response) -> Result<()> {
     }
 }
 
+/// GET a text resource (any URL).
+pub async fn get_text(url: &str) -> Result<String> {
+    let resp = send(request("GET", url)).await?;
+    check(url, &resp)?;
+    resp.text().map_err(http_err)
+}
+
 fn request(method: &str, url: &str) -> rsurl::aio::Request {
     rsurl::aio::Request::new(method, url)
         .follow_redirects(true)

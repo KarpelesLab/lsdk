@@ -225,6 +225,21 @@ enum Hw1Cmd {
         pin: String,
         message: String,
     },
+    /// Update the firmware (to OS 1.0.4) through the bootloader, with Ledger's
+    /// signed images from its Chrome app repository (checked against pinned
+    /// hashes). A set-up dongle on firmware < 1.1.0 is erased first.
+    Update {
+        /// Only read the dongle and fetch the files: show what would be sent.
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow erasing a set-up dongle (its seed and PIN): have its recovery phrase.
+        #[arg(long)]
+        erase: bool,
+        /// Read the firmware files from this directory (`app/firmwares` of
+        /// ledger-wallet-chrome) instead of downloading them.
+        #[arg(long)]
+        firmware_dir: Option<std::path::PathBuf>,
+    },
     /// Sign a P2PKH transaction to one address, change back to --change-path.
     /// Prints the signed transaction (hex); nothing is broadcast.
     SignTx {
@@ -718,6 +733,229 @@ fn hw1_confirm(cli: &Cli, c: &btchip::Confirmation) -> Result<(String, Device<Hi
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Wait for a legacy dongle (any mode) and open it. Returns the device and
+/// whether it is in bootloader mode.
+async fn hw1_open_any(cli: &Cli, wait: Duration) -> Result<(Device<HidTransport>, bool)> {
+    use lsdk::framing::{LegacyFraming, legacy_framing};
+    let start = std::time::Instant::now();
+    let info = loop {
+        let found = HidTransport::list()?
+            .into_iter()
+            .find(|d| match &cli.device {
+                Some(p) => &d.path == p,
+                None => d.legacy,
+            });
+        if let Some(i) = found {
+            break i;
+        }
+        if start.elapsed() > wait {
+            return Err(Error::NoDevice);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    // Give a freshly enumerated dongle a moment.
+    std::thread::sleep(Duration::from_millis(300));
+    let open = |plain: bool, timeout: u64| -> Result<Device<HidTransport>> {
+        let mut t = HidTransport::open(&info)?;
+        t.set_plain(plain);
+        t.set_timeout(Some(Duration::from_secs(timeout)));
+        Ok(Device::new(t))
+    };
+    match legacy_framing(info.product_id) {
+        Some(LegacyFraming::Plain) if info.product_id == 0x1807 => Ok((open(true, 10)?, true)),
+        Some(LegacyFraming::Plain) => Ok((open(true, 10)?, false)),
+        _ => {
+            // 0x3b7c: the OS (channel framing) or a bootloader (plain framing).
+            {
+                let d = open(false, 2)?;
+                if btchip::BtchipWallet::new(&d).firmware().await.is_ok() {
+                    drop(d);
+                    return Ok((open(false, 10)?, false));
+                }
+            }
+            let d = open(true, 2)?;
+            if lsdk::btchip_update::is_bootloader(&d).await? {
+                drop(d);
+                Ok((open(true, 10)?, true))
+            } else {
+                Err(Error::App(
+                    "the dongle answers neither as an OS nor as a bootloader".into(),
+                ))
+            }
+        }
+    }
+}
+
+/// Wait for the dongle to go away (reboot or unplug).
+fn hw1_wait_gone(cli: &Cli, wait: Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    while HidTransport::list()?
+        .iter()
+        .any(|d| cli.device.as_ref().map_or(d.legacy, |p| &d.path == p))
+    {
+        if start.elapsed() > wait {
+            return Err(Error::Timeout);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Ok(())
+}
+
+async fn hw1_script(dir: &Option<std::path::PathBuf>, name: &str) -> Result<Vec<Vec<u8>>> {
+    use lsdk::btchip_update::{fetch_script, load_script};
+    match dir {
+        Some(d) => {
+            let p = d.join(format!("btchipfirmware-{name}.js"));
+            let text = std::fs::read_to_string(&p)
+                .map_err(|e| Error::InvalidInput(format!("{}: {e}", p.display())))?;
+            load_script(name, &text)
+        }
+        None => fetch_script(name).await,
+    }
+}
+
+/// Erase a set-up dongle with wrong PINs (it erases itself after 3).
+async fn hw1_erase(cli: &Cli) -> Result<()> {
+    loop {
+        let (d, bootloader) = hw1_open_any(cli, Duration::from_secs(120)).await?;
+        if bootloader {
+            return Ok(());
+        }
+        let w = btchip::BtchipWallet::new(&d);
+        let Some(left) = w.pin_attempts().await? else {
+            eprintln!("> the dongle is erased");
+            return Ok(());
+        };
+        // Two digits: never a valid PIN (4 to 32 characters).
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|t| t.subsec_nanos())
+            .unwrap_or(0)
+            % 100;
+        let _ = w.verify_pin(&format!("{n:02}")).await;
+        drop(d);
+        eprintln!(
+            "> wrong PIN sent ({} attempt(s) were left): unplug the dongle and plug it back",
+            left
+        );
+        hw1_wait_gone(cli, Duration::from_secs(300))?;
+    }
+}
+
+async fn hw1_update(
+    cli: &Cli,
+    dry_run: bool,
+    erase: bool,
+    dir: &Option<std::path::PathBuf>,
+) -> Result<()> {
+    use lsdk::btchip_update::{
+        Step, bootloader_info, is_slow_bootloader, plan_bootloader, plan_os, run_script,
+        version_string,
+    };
+    let mut os_loaded = false;
+    for _ in 0..12 {
+        let (d, bootloader) = hw1_open_any(cli, Duration::from_secs(90)).await?;
+        let (steps, slow) = if bootloader {
+            let info = bootloader_info(&d).await?;
+            eprintln!(
+                "> bootloader {}, customer id {:04x}",
+                version_string(info.version),
+                info.customer_id
+            );
+            (vec![plan_bootloader(&info)?], is_slow_bootloader(&info))
+        } else {
+            let w = btchip::BtchipWallet::new(&d);
+            let fw = w.firmware().await?;
+            let (a, b, c) = lsdk::model::parse_version(&fw.version);
+            let set_up = w.operation_mode().await?.is_some();
+            eprintln!(
+                "> OS {} (architecture 0x{:02x}), {}",
+                fw.version,
+                fw.architecture,
+                if set_up { "set up" } else { "not set up" }
+            );
+            let steps = plan_os(
+                (fw.architecture, lsdk::btchip_update::v(a, b, c)),
+                set_up,
+                os_loaded,
+            )?;
+            (steps, false)
+        };
+        if dry_run {
+            for s in &steps {
+                match s.file() {
+                    Some(f) => {
+                        let apdus = hw1_script(dir, f).await?;
+                        eprintln!("> would send {f} ({} APDUs, hash checked)", apdus.len());
+                    }
+                    None => eprintln!("> {s:?}"),
+                }
+            }
+            if steps.iter().any(Step::reboots) {
+                eprintln!(
+                    "> then, after the reboot into the bootloader: the bootloader reloader, bootloader or OS image matching its customer id"
+                );
+            }
+            println!("dry run: nothing was written");
+            return Ok(());
+        }
+        for step in steps {
+            match &step {
+                Step::UpToDate => {
+                    println!(
+                        "firmware {} is up to date",
+                        version_string(lsdk::btchip_update::LATEST_OS.1)
+                    );
+                    return Ok(());
+                }
+                Step::Erase => {
+                    if !erase {
+                        return Err(Error::App(
+                            "the dongle is set up: updating erases its seed and PIN first; pass --erase (keep its recovery phrase)"
+                                .into(),
+                        ));
+                    }
+                    drop(d);
+                    hw1_erase(cli).await?;
+                    break;
+                }
+                _ => {
+                    let name = step.file().unwrap_or_default().to_string();
+                    let apdus = hw1_script(dir, &name).await?;
+                    let mut progress = |i: usize, n: usize| {
+                        eprint!("\r> {name}: {i}/{n}");
+                        if i == n {
+                            eprintln!();
+                        }
+                        let _ = std::io::stderr().flush();
+                    };
+                    run_script(&d, &apdus, step.options(slow), &mut progress).await?;
+                    if matches!(step, Step::LoadOs(_)) {
+                        os_loaded = true;
+                    }
+                    if matches!(step, Step::InitOs(_)) {
+                        println!(
+                            "updated to {}: set it up again (lsdk hw1 setup)",
+                            version_string(lsdk::btchip_update::LATEST_OS.1)
+                        );
+                        return Ok(());
+                    }
+                    if step.reboots() {
+                        eprintln!("> the dongle reboots...");
+                        drop(d);
+                        // It may re-enumerate faster than we poll.
+                        let _ = hw1_wait_gone(cli, Duration::from_secs(10));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Err(Error::App(
+        "the update did not finish after 12 steps".into(),
+    ))
 }
 
 /// `RAW_TX_HEX_OR_FILE:VOUT:PATH`.
@@ -1659,6 +1897,14 @@ async fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Cmd::Hw1 {
+            cmd:
+                Hw1Cmd::Update {
+                    dry_run,
+                    erase,
+                    firmware_dir,
+                },
+        } => hw1_update(&cli, *dry_run, *erase, firmware_dir).await?,
         Cmd::Hw1 { cmd } => {
             let d = open(&cli)?;
             if !d.transport().info().legacy {
@@ -1669,6 +1915,7 @@ async fn run(cli: Cli) -> Result<()> {
             let w = btchip::BtchipWallet::new(&d);
             match cmd {
                 Hw1Cmd::Info => print(&hw1_info(&d).await?),
+                Hw1Cmd::Update { .. } => unreachable!(),
                 Hw1Cmd::Setup {
                     pin,
                     words,

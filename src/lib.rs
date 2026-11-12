@@ -65,6 +65,9 @@ pub mod apps;
 #[cfg(feature = "btchip")]
 pub mod btchip;
 
+#[cfg(feature = "btchip")]
+pub mod btchip_update;
+
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub mod wasm;
 

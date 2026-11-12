@@ -207,6 +207,12 @@ impl HidTransport {
         }
     }
 
+    /// Force the bare HID framing of legacy bootloaders ([`LegacyFraming::Plain`])
+    /// on or off: a 0x3b7c dongle uses it in bootloader mode only.
+    pub fn set_plain(&mut self, plain: bool) {
+        self.plain = plain;
+    }
+
     /// Set a timeout for each exchange. `None` (default) waits forever, which
     /// is needed for actions requiring user confirmation.
     pub fn set_timeout(&mut self, timeout: Option<Duration>) {
