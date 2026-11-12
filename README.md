@@ -21,6 +21,8 @@ USB HID natively or through WebHID in the browser.
   **sideloading apps from their ELF**, memory info, delete apps, firmware hash;
   endorsement keys (your owner key, or vendor endorsement through the HSM),
   host onboarding (test devices) and factory commands
+* **Legacy HW.1 / original Nano** (BTChip firmware): setup, PIN, addresses,
+  message and P2PKH transaction signing with the keyboard confirmation
 * **App clients** to derive addresses, **generate transactions**
   (with [outscript](https://crates.io/crates/outscript)) and sign them on the
   device: Ethereum / EVM, Bitcoin (PSBT, wallet policies), Solana
@@ -212,6 +214,26 @@ recovery mode, `lsdk ca install`, then `lsdk recover restore` while still in
 recovery mode (the restore step survives the reboot), and `lsdk ca remove
 --recover` afterwards. The PIN may differ from the one used at backup time.
 
+### HW.1 / original Nano (BTChip)
+
+The 2014-2015 dongles (USB vendor `2581`) run the BTChip firmware: no screen,
+no apps, legacy Base58 (P2PKH) addresses only. The PIN is typed on the
+computer, and operations are confirmed by unplugging the dongle: plugged into a
+computer with a text editor focused, it **types** a summary and a one-time
+code, then goes back and the code is entered. **3 wrong PINs erase it.**
+
+```sh
+lsdk hw1 info                                    # firmware, setup state, PIN attempts, attestation
+lsdk hw1 setup --pin 1234                        # new / wiped dongle: it generates and types its seed
+lsdk hw1 setup --pin 1111 --words "..." --i-understand-the-seed-travels-over-usb   # test devices
+lsdk hw1 address --pin 1234 --path "44'/0'/0'/0/0"
+lsdk hw1 sign-message --pin 1234 "message"       # asks for the typed code
+lsdk hw1 sign-tx --pin 1234 --input PREV_TX_HEX_OR_FILE:VOUT:PATH --to 1... --amount 50000 --fee 1000
+```
+
+`sign-tx` prints the signed transaction; nothing is broadcast. The web console
+shows a dedicated HW.1 view when one is connected.
+
 ### Linux: udev rules
 
 On Linux the device node is root-only by default; both the CLI and the
@@ -223,6 +245,8 @@ As root:
 cat > /etc/udev/rules.d/20-hw1.rules <<'EOF'
 SUBSYSTEMS=="usb", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
 KERNEL=="hidraw*", ATTRS{idVendor}=="2c97", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="2581", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
+KERNEL=="hidraw*", ATTRS{idVendor}=="2581", MODE="0660", TAG+="uaccess", TAG+="udev-acl"
 EOF
 udevadm control --reload-rules && udevadm trigger
 ```

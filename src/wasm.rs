@@ -355,6 +355,115 @@ impl HwDevice {
         self.device.transport().product_id()
     }
 
+    /// Legacy HW.1 / original Nano (BTChip firmware): use the `hw1*` methods,
+    /// the dashboard ones don't apply.
+    #[wasm_bindgen(getter, js_name = isLegacy)]
+    pub fn is_legacy(&self) -> bool {
+        self.device.transport().is_legacy()
+    }
+
+    /// HW.1: firmware, setup state, operation mode, PIN attempts and
+    /// attestation (against a random challenge).
+    #[wasm_bindgen(js_name = hw1Info)]
+    pub async fn hw1_info(&self) -> JsResult<JsValue> {
+        let w = crate::btchip::BtchipWallet::new(&self.device);
+        let firmware = w.firmware().await.map_err(js_err)?;
+        let operation_mode = w.operation_mode().await.map_err(js_err)?;
+        let pin_attempts = w.pin_attempts().await.map_err(js_err)?;
+        let mut blob = [0u8; 8];
+        crate::attestation::rand_bytes(&mut blob).map_err(js_err)?;
+        let attestation = w.attestation(blob).await.ok();
+        to_js(&serde_json::json!({
+            "firmware": firmware,
+            "setUp": operation_mode.is_some(),
+            "operationMode": operation_mode,
+            "pinAttempts": pin_attempts,
+            "attestation": attestation,
+        }))
+    }
+
+    /// HW.1 first setup (Ledger's defaults). `words`: BIP-39 phrase to restore
+    /// (**sent in clear**, test devices), or null to let the dongle generate a
+    /// seed (it then types it on later power-ups until the PIN is entered).
+    /// Returns whether the dongle will type a generated seed.
+    #[wasm_bindgen(js_name = hw1Setup)]
+    pub async fn hw1_setup(
+        &self,
+        pin: String,
+        words: Option<String>,
+        passphrase: String,
+        testnet: bool,
+    ) -> JsResult<bool> {
+        let seed = match words {
+            Some(w) => Some(
+                crate::btchip::bip39_seed(&w, &passphrase)
+                    .map_err(js_err)?
+                    .to_vec(),
+            ),
+            None => None,
+        };
+        let mut s = crate::btchip::Setup::new(pin, seed);
+        if testnet {
+            s.key_version = 111;
+            s.p2sh_version = 196;
+        }
+        crate::btchip::BtchipWallet::new(&self.device)
+            .setup(&s)
+            .await
+            .map_err(js_err)
+    }
+
+    /// HW.1: unlock. **3 wrong PINs erase the dongle**; replug it after a
+    /// wrong one.
+    #[wasm_bindgen(js_name = hw1VerifyPin)]
+    pub async fn hw1_verify_pin(&self, pin: String) -> JsResult<()> {
+        crate::btchip::BtchipWallet::new(&self.device)
+            .verify_pin(&pin)
+            .await
+            .map(|_| ())
+            .map_err(js_err)
+    }
+
+    /// HW.1: `{publicKey, address, chainCode}` of a path (PIN first).
+    #[wasm_bindgen(js_name = hw1Address)]
+    pub async fn hw1_address(&self, path_s: String) -> JsResult<JsValue> {
+        let p = path(&path_s)?;
+        to_js(
+            &crate::btchip::BtchipWallet::new(&self.device)
+                .wallet_public_key(&p)
+                .await
+                .map_err(js_err)?,
+        )
+    }
+
+    /// HW.1: start signing a message (PIN first). Returns the confirmation
+    /// needed (`{kind, data}`), or null: then call `hw1SignMessageFinish`
+    /// (after the power cycles, on the reopened device, with the typed code).
+    #[wasm_bindgen(js_name = hw1SignMessagePrepare)]
+    pub async fn hw1_sign_message_prepare(
+        &self,
+        path_s: String,
+        message: String,
+    ) -> JsResult<JsValue> {
+        let p = path(&path_s)?;
+        to_js(
+            &crate::btchip::BtchipWallet::new(&self.device)
+                .sign_message_prepare(&p, message.as_bytes())
+                .await
+                .map_err(js_err)?,
+        )
+    }
+
+    /// HW.1: finish a message signature with the typed code ("" if none was
+    /// asked). Returns the Base64 (Bitcoin-QT) signature.
+    #[wasm_bindgen(js_name = hw1SignMessageFinish)]
+    pub async fn hw1_sign_message_finish(&self, code: String) -> JsResult<String> {
+        let w = crate::btchip::BtchipWallet::new(&self.device);
+        let compressed = w.firmware().await.map_err(js_err)?.compressed_keys;
+        let der = w.sign_message_finish(&code).await.map_err(js_err)?;
+        crate::btchip::message_signature_base64(&der, compressed).map_err(js_err)
+    }
+
     #[wasm_bindgen(getter)]
     pub fn model(&self) -> Option<String> {
         self.device
@@ -1373,4 +1482,85 @@ fn build_eth_tx(i: &EthTxIn) -> Result<eth::EvmTx> {
         }
     }
     Ok(tx)
+}
+
+/// HW.1 P2PKH transaction signing, kept across the confirmation power
+/// cycles: call `step` with the current device, again after a reconnect.
+#[wasm_bindgen]
+pub struct Hw1TxSigner {
+    inner: crate::btchip::TxSigner,
+}
+
+#[wasm_bindgen]
+impl Hw1TxSigner {
+    /// `inputs`: `[{rawTx: hex, vout, path}]`; `payment`: `{to, amount, fee,
+    /// changePath}` (satoshis).
+    #[wasm_bindgen(constructor)]
+    pub fn new(inputs: JsValue, payment: JsValue) -> JsResult<Hw1TxSigner> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct In {
+            raw_tx: String,
+            vout: u32,
+            path: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Pay {
+            to: String,
+            amount: u64,
+            fee: u64,
+            change_path: String,
+        }
+        let ins: Vec<In> = from_js(inputs)?;
+        let pay: Pay = from_js(payment)?;
+        let inputs = ins
+            .into_iter()
+            .map(|i| {
+                let raw = hex::decode(i.raw_tx.trim())
+                    .map_err(|e| js_err(Error::InvalidInput(format!("transaction hex: {e}"))))?;
+                Ok(crate::btchip::SpendInput {
+                    prev_tx: crate::btchip::Tx::parse(&raw).map_err(js_err)?,
+                    vout: i.vout,
+                    path: path(&i.path)?,
+                })
+            })
+            .collect::<JsResult<Vec<_>>>()?;
+        let inner = crate::btchip::TxSigner::new(
+            inputs,
+            crate::btchip::Payment {
+                to: pay.to,
+                amount: pay.amount,
+                fee: pay.fee,
+                change_path: path(&pay.change_path)?,
+            },
+        )
+        .map_err(js_err)?;
+        Ok(Hw1TxSigner { inner })
+    }
+
+    /// `{change, total}` in satoshis.
+    pub fn summary(&self) -> JsResult<JsValue> {
+        let (change, total) = self.inner.summary();
+        to_js(&serde_json::json!({ "change": change, "total": total }))
+    }
+
+    /// Code typed by the dongle after the power cycles.
+    #[wasm_bindgen(js_name = setCode)]
+    pub fn set_code(&mut self, code: String) {
+        self.inner.set_code(code);
+    }
+
+    /// Run until a confirmation (`{confirm: {kind, data}}`) or the end
+    /// (`{tx: hex}`). The PIN must be verified on this power-up; after a
+    /// reconnect, a 0x6982 error means: verify the PIN, then step again.
+    pub async fn step(&mut self, device: &HwDevice) -> JsResult<JsValue> {
+        let w = crate::btchip::BtchipWallet::new(&device.device);
+        match self.inner.step(&w).await.map_err(js_err)? {
+            crate::btchip::TxStep::Done(tx) => to_js(&serde_json::json!({ "tx": hex::encode(tx) })),
+            crate::btchip::TxStep::NeedsConfirmation(c) => {
+                to_js(&serde_json::json!({ "confirm": c }))
+            }
+        }
+    }
 }

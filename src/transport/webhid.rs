@@ -15,11 +15,11 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::VENDOR_ID;
 use crate::error::{Error, Result};
 use crate::framing::{self, DEFAULT_CHANNEL, PACKET_SIZE};
 use crate::model::DeviceModel;
 use crate::transport::Transport;
+use crate::{LEGACY_VENDOR_ID, VENDOR_ID};
 
 #[wasm_bindgen]
 extern "C" {
@@ -93,10 +93,14 @@ async fn call_hid(method: &str, args: &Array) -> Result<Vec<HidDevice>> {
 
 /// Open the browser picker filtered on our vendor id. Requires a user gesture.
 pub async fn request_devices() -> Result<Vec<HidDevice>> {
-    let filter = Object::new();
-    Reflect::set(&filter, &"vendorId".into(), &JsValue::from(VENDOR_ID)).map_err(js_err)?;
+    let filters = Array::new();
+    for vid in [VENDOR_ID, LEGACY_VENDOR_ID] {
+        let filter = Object::new();
+        Reflect::set(&filter, &"vendorId".into(), &JsValue::from(vid)).map_err(js_err)?;
+        filters.push(&filter);
+    }
     let opts = Object::new();
-    Reflect::set(&opts, &"filters".into(), &Array::of1(&filter)).map_err(js_err)?;
+    Reflect::set(&opts, &"filters".into(), &filters).map_err(js_err)?;
     call_hid("requestDevice", &Array::of1(&opts)).await
 }
 
@@ -105,7 +109,11 @@ pub async fn granted_devices() -> Result<Vec<HidDevice>> {
     Ok(call_hid("getDevices", &Array::new())
         .await?
         .into_iter()
-        .filter(|d| d.vendor_id() == VENDOR_ID)
+        .filter(|d| {
+            d.vendor_id() == VENDOR_ID
+                || (d.vendor_id() == LEGACY_VENDOR_ID
+                    && framing::legacy_framing(d.product_id()).is_some())
+        })
         .collect())
 }
 
@@ -119,6 +127,8 @@ pub struct WebHidTransport {
     on_disconnect: Closure<dyn FnMut(JsValue)>,
     disconnected: Rc<Cell<bool>>,
     channel: u16,
+    /// Legacy BTChip device with bare HID framing (`61xx` replies).
+    plain: bool,
 }
 
 impl WebHidTransport {
@@ -148,7 +158,7 @@ impl WebHidTransport {
             JsFuture::from(device.open()).await.map_err(|e| match js_err(e) {
                 Error::Transport(m) if m.contains("Failed to open") => Error::Transport(format!(
                     "{m} The OS denied access: close other wallet software using the device; on Linux, \
-                     install udev rules granting access to USB vendor 2c97 (see the README), then replug it."
+                     install udev rules granting access to USB vendors 2c97 and 2581 (see the README), then replug it."
                 )),
                 e => e,
             })?;
@@ -189,11 +199,14 @@ impl WebHidTransport {
             let _ = f.call2(&hid, &"disconnect".into(), on_disconnect.as_ref());
         }
 
+        let plain = device.vendor_id() == LEGACY_VENDOR_ID
+            && framing::legacy_framing(device.product_id()) == Some(framing::LegacyFraming::Plain);
         Ok(Self {
             device,
             rx: Mutex::new(rx),
             on_report,
             on_disconnect,
+            plain,
             disconnected,
             channel: DEFAULT_CHANNEL,
         })
@@ -207,6 +220,11 @@ impl WebHidTransport {
     /// USB product id.
     pub fn product_id(&self) -> u16 {
         self.device.product_id()
+    }
+
+    /// Legacy BTChip family (HW.1, original Nano): see [`crate::btchip`].
+    pub fn is_legacy(&self) -> bool {
+        self.device.vendor_id() == LEGACY_VENDOR_ID
     }
 
     /// Device model deduced from the USB product id.
@@ -253,7 +271,12 @@ impl Transport for WebHidTransport {
         while let Ok(p) = rx.try_recv() {
             p?;
         }
-        for packet in framing::encode(self.channel, apdu, PACKET_SIZE) {
+        let packets = if self.plain {
+            framing::encode_plain(apdu, PACKET_SIZE)
+        } else {
+            framing::encode(self.channel, apdu, PACKET_SIZE)
+        };
+        for packet in packets {
             let arr = Uint8Array::from(packet.as_slice());
             JsFuture::from(self.device.send_report(0, &arr))
                 .await
@@ -266,9 +289,15 @@ impl Transport for WebHidTransport {
                 })?;
         }
         let mut decoder = framing::Decoder::new(self.channel);
+        let mut plain = framing::PlainDecoder::new();
         loop {
             let packet = rx.next().await.ok_or(Error::Disconnected)??;
-            if let Some(resp) = decoder.push(&packet)? {
+            let done = if self.plain {
+                plain.push(&packet)?
+            } else {
+                decoder.push(&packet)?
+            };
+            if let Some(resp) = done {
                 return Ok(resp);
             }
         }

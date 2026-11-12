@@ -110,6 +110,11 @@ let lockPoll = null
 
 export async function refreshInfo() {
   if (!state.device) return
+  if (state.device.isLegacy) {
+    // HW.1 / original Nano: no dashboard, see Hw1Tab.
+    state.info = { legacy: true, model: 'HW.1 / Nano (2014)', hw1: await state.device.hw1Info() }
+    return
+  }
   const wasLocked = state.info?.locked
   state.info = await state.device.info()
   if (state.info?.locked) {

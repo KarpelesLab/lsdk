@@ -5,6 +5,7 @@ import DeviceTab from './components/DeviceTab.vue'
 import AppsTab from './components/AppsTab.vue'
 import FirmwareTab from './components/FirmwareTab.vue'
 import AdvancedTab from './components/AdvancedTab.vue'
+import Hw1Tab from './components/Hw1Tab.vue'
 import ActivityLog from './components/ActivityLog.vue'
 import BootloaderModal from './components/BootloaderModal.vue'
 
@@ -76,7 +77,7 @@ onMounted(() => boot().catch((e) => { error.value = errorText(e); log('error', e
           <button class="primary" @click="doConnect">Connect device</button>
         </div>
         <template v-else>
-          <nav class="tabs">
+          <nav v-if="!state.info?.legacy" class="tabs">
             <button v-for="t in tabs" :key="t.id" :class="{ active: tab === t.id }" @click="select(t.id)">{{ t.label }}</button>
           </nav>
           <div v-if="state.busy" class="busy panel">
@@ -91,7 +92,8 @@ onMounted(() => boot().catch((e) => { error.value = errorText(e); log('error', e
             </div>
             <div v-if="state.progress !== null" class="bar"><div :style="{ width: (state.progress * 100).toFixed(1) + '%' }"></div></div>
           </div>
-          <KeepAlive>
+          <Hw1Tab v-if="state.info?.legacy" />
+          <KeepAlive v-else>
             <component :is="current.comp" :key="current.id" />
           </KeepAlive>
         </template>
