@@ -159,9 +159,8 @@ lsdk sol transfer --to ... --amount 0.1 --blockhash ...
 > secure channel was allowed). lsdk refuses
 > to forward an empty commit, because the device
 > would store the empty certificate and keep the slot unusable until
-> `lsdk endorse reset`. A former vendor engineer noted that the `attest_1`
-> owner key was removed at some point, which would explain the empty
-> certificate. On devices whose vendor certificate is checked against the root
+> `lsdk endorse reset`. The `attest_1` owner key was reportedly removed at
+> some point, which would explain the empty certificate. On devices whose vendor certificate is checked against the root
 > CA (seen on a Stax), vendor HSM sessions are refused while a custom CA is
 > installed.
 
