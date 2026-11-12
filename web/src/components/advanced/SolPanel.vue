@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { state, run, log, errorText } from '../../lib/store.js'
+import { state, runInApp, log, errorText } from '../../lib/store.js'
 import { jsonRpc } from '../../lib/net.js'
 import AppGate from './AppGate.vue'
 
@@ -31,12 +31,12 @@ async function guard(fn) {
 }
 
 const getAddress = (display) => guard(async () => {
-  address.value = await run(display ? 'verify address' : 'get address', (d) => {
+  address.value = await runInApp('Solana', display ? 'verify address' : 'get address', (d) => {
     if (display) state.prompt = 'Compare the address on the device'
     return d.solAddress(path.value, display)
   })
   log('info', `SOL address ${address.value}`)
-  config.value = await run('app config', (d) => d.solConfig()).catch(() => null)
+  config.value = await runInApp('Solana', 'app config', (d) => d.solConfig()).catch(() => null)
 })
 
 const host = computed(() => { try { return new URL(rpc.value).host } catch { return rpc.value } })
@@ -57,7 +57,7 @@ const fetchBlockhash = () => guard(async () => {
 const sign = () => guard(async () => {
   signed.value = null
   sent.value = null
-  signed.value = await run('sign transfer', (d) => {
+  signed.value = await runInApp('Solana', 'sign transfer', (d) => {
     state.prompt = 'Review and approve the transfer on the device'
     return d.solTransfer(path.value, tx.to.trim(), tx.amount, tx.blockhash)
   })

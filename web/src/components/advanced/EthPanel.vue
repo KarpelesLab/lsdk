@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
-import { state, run, log, errorText } from '../../lib/store.js'
+import { state, runInApp, log, errorText } from '../../lib/store.js'
 import { jsonRpc, gweiStr } from '../../lib/net.js'
 import { parseUnits } from '../../pkg/lsdk.js'
 import AppGate from './AppGate.vue'
@@ -42,13 +42,13 @@ async function guard(fn) {
 }
 
 const getAddress = (display) => guard(async () => {
-  const a = await run(display ? 'verify address' : 'get address', (d) => {
+  const a = await runInApp('Ethereum', display ? 'verify address' : 'get address', (d) => {
     if (display) state.prompt = 'Compare the address on the device'
     return d.ethAddress(path.value, display)
   })
   address.value = a.address
   log('info', `ETH address ${a.address}`)
-  config.value = await run('app config', (d) => d.ethConfig()).catch(() => null)
+  config.value = await runInApp('Ethereum', 'app config', (d) => d.ethConfig()).catch(() => null)
 })
 
 const host = computed(() => { try { return new URL(rpc.value).host } catch { return rpc.value } })
@@ -103,7 +103,7 @@ const sign = () => guard(async () => {
     data: tx.data || undefined, token: tx.token || undefined, decimals: Number(tx.decimals),
     ...(tx.legacy ? { gasPrice: tx.gasPrice } : { maxFee: tx.maxFee, priorityFee: tx.priorityFee || '0' }),
   }
-  signed.value = await run('sign transaction', (d) => {
+  signed.value = await runInApp('Ethereum', 'sign transaction', (d) => {
     state.prompt = 'Review and approve the transaction on the device'
     return d.ethSignTx(path.value, input)
   })
@@ -116,14 +116,14 @@ const broadcast = () => guard(async () => {
 })
 
 const signMsg = () => guard(async () => {
-  msgSig.value = await run('sign message', (d) => {
+  msgSig.value = await runInApp('Ethereum', 'sign message', (d) => {
     state.prompt = 'Review and sign the message on the device'
     return d.ethSignMessage(path.value, msg.value)
   })
 })
 
 const signTyped = () => guard(async () => {
-  typed.sig = await run('sign typed data', (d) => {
+  typed.sig = await runInApp('Ethereum', 'sign typed data', (d) => {
     state.prompt = 'Review and sign on the device'
     return d.ethSignTypedHashes(path.value, typed.domain.trim(), typed.message.trim())
   })

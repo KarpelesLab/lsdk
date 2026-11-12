@@ -207,6 +207,20 @@ export async function ensureApp(name) {
   await openApp(name)
 }
 
+// Run an app command, opening `app` first if something else is running
+// (the dashboard answers app commands with 0x6511).
+export async function runInApp(app, label, fn, opts) {
+  try {
+    await ensureApp(app)
+  } catch (e) {
+    if (e?.kind === 'NotFound') {
+      throw new Error(`the ${app} app is not installed: use "Open ${app}" above to install it`)
+    }
+    throw e
+  }
+  return run(label, fn, opts)
+}
+
 // Wait for the device to come back (reboot / re-enumeration).
 export async function waitDevice(phase = 'reboot', timeout = 600000) {
   state.fwPhase = phase

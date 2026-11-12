@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { state, run, log, errorText } from '../../lib/store.js'
+import { state, runInApp, log, errorText } from '../../lib/store.js'
 import { Esplora, satsToBtc, btcToSats } from '../../lib/net.js'
 import { btcDeriveAddresses, btcEstimateVsize } from '../../pkg/lsdk.js'
 import AppGate from './AppGate.vue'
@@ -53,7 +53,7 @@ async function guard(fn) {
 }
 
 const loadAccount = () => guard(async () => {
-  account.value = await run('load account', (d) => d.btcAccount(kind.value, Number(accountIdx.value), net.value.testnet))
+  account.value = await runInApp(appName.value, 'load account', (d) => d.btcAccount(kind.value, Number(accountIdx.value), net.value.testnet))
   log('info', `account ${account.value.path}`)
   // Local derivation only: nothing is sent anywhere until "Scan" is clicked.
   addrs.value = {
@@ -116,7 +116,7 @@ const nextReceive = computed(() => addrs.value.receive.find((a) => a.txs === 0))
 const nextChange = computed(() => addrs.value.change.find((a) => a.txs === 0) ?? { index: 0 })
 
 const verify = (a, change) => guard(async () => {
-  const shown = await run('verify address', (d) => {
+  const shown = await runInApp(appName.value, 'verify address', (d) => {
     state.prompt = 'Compare the address on the device'
     return d.btcAddress(kind.value, Number(accountIdx.value), net.value.testnet, change, a.index, true)
   })
@@ -163,7 +163,7 @@ const build = () => guard(async () => {
     changeIndex: sel.change ? nextChange.value.index : undefined, changeAmount: sel.change || undefined,
   }
   log('info', `sending ${satsToBtc(sel.amount)} BTC, fee ${sel.fee} sat, change ${sel.change} sat`)
-  result.value = { ...(await run('sign transaction', (d) => {
+  result.value = { ...(await runInApp(appName.value, 'sign transaction', (d) => {
     state.prompt = 'Review the outputs and fee, then approve on the device'
     return d.btcSend(req)
   })), fee: sel.fee, amount: sel.amount, change: sel.change }
@@ -176,14 +176,14 @@ const broadcast = () => guard(async () => {
 })
 
 const signMessage = () => guard(async () => {
-  message.sig = await run('sign message', (d) => {
+  message.sig = await runInApp(appName.value, 'sign message', (d) => {
     state.prompt = 'Review and sign the message on the device'
     return d.btcSignMessage(msgPath.value, message.text)
   })
 })
 
 const signPsbt = () => guard(async () => {
-  psbt.out = await run('sign PSBT', (d) => {
+  psbt.out = await runInApp(appName.value, 'sign PSBT', (d) => {
     state.prompt = 'Review and approve on the device'
     return d.btcSignPsbt(kind.value, Number(accountIdx.value), net.value.testnet, psbt.input)
   })
