@@ -567,6 +567,10 @@ fn progress(ev: HsmEvent) {
             let _ = std::io::stderr().flush();
         }
         HsmEvent::Warning { message } => eprintln!("> warning: {message}"),
+        // LSDK_DEBUG=1: log the APDUs the HSM sends through us.
+        HsmEvent::Exchange { apdu, status } if std::env::var_os("LSDK_DEBUG").is_some() => {
+            eprintln!("> hsm apdu {} -> {status:04x}", hex::encode(&apdu));
+        }
         _ => {}
     }
 }

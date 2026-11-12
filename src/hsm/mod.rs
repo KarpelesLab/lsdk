@@ -137,6 +137,26 @@ pub async fn run<T: Transport + ?Sized>(
     url: &str,
     on_event: &mut dyn FnMut(HsmEvent),
 ) -> Result<HsmOutcome> {
+    run_inner(transport, url, on_event, false).await
+}
+
+/// Like [`run`], but answers an empty successful response with `"9000"`
+/// the way blue-loader-python does. Scripts written for that client (such as
+/// `/endorse`) reject an empty reply with "Invalid status".
+pub async fn run_legacy<T: Transport + ?Sized>(
+    transport: &T,
+    url: &str,
+    on_event: &mut dyn FnMut(HsmEvent),
+) -> Result<HsmOutcome> {
+    run_inner(transport, url, on_event, true).await
+}
+
+async fn run_inner<T: Transport + ?Sized>(
+    transport: &T,
+    url: &str,
+    on_event: &mut dyn FnMut(HsmEvent),
+    legacy: bool,
+) -> Result<HsmOutcome> {
     let mut ws = WsConn::connect(url).await?;
     on_event(HsmEvent::Opened);
     // An error from the device is only fatal if the HSM hangs up right after.
@@ -163,6 +183,17 @@ pub async fn run<T: Transport + ?Sized>(
                 if apdu.len() < 5 {
                     return Err(Error::Hsm(format!("invalid APDU from HSM: {data}")));
                 }
+                // ENDORSE_SET_COMMIT stores the pending key with whatever
+                // certificate it gets, without checking it: an empty one
+                // leaves the slot unusable until an endorsement reset.
+                if apdu[0] == 0xe0 && apdu[1] == 0xc2 && apdu[4] == 0 {
+                    ws.close().await;
+                    return Err(Error::Hsm(
+                        "the HSM sent an endorsement commit without a certificate; \
+                         not forwarded to the device"
+                            .into(),
+                    ));
+                }
                 let asks_permission = apdu[0] == 0xe0 && apdu[1] == 0x51;
                 if asks_permission {
                     on_event(HsmEvent::PermissionRequested);
@@ -187,7 +218,11 @@ pub async fn run<T: Transport + ?Sized>(
                 let reply = serde_json::json!({
                     "nonce": msg.nonce.unwrap_or(Value::Null),
                     "response": response,
-                    "data": hex::encode(&resp.data),
+                    "data": if legacy && resp.data.is_empty() && resp.sw.is_ok() {
+                        "9000".to_owned()
+                    } else {
+                        hex::encode(&resp.data)
+                    },
                 });
                 ws.send(reply.to_string()).await?;
             }

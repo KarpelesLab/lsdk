@@ -140,13 +140,22 @@ lsdk apps
 lsdk install Bitcoin
 lsdk firmware check
 lsdk lang available | lsdk lang install french
-lsdk endorse info 1 | lsdk endorse setup 1   # or --vendor: certified by the vendor HSM
+lsdk endorse info 1 | lsdk endorse setup 1   # or --vendor (see below)
 lsdk firmware hash | lsdk app delete-all
 lsdk eth address --display
 lsdk eth sign-tx --nonce 0 --to 0x... --value 0.01 --max-fee 30
 lsdk btc address --kind taproot --display
 lsdk sol transfer --to ... --amount 0.1 --blockhash ...
 ```
+
+> **Vendor endorsement (`endorse setup --vendor`)** runs the vendor HSM's
+> `/endorse` script (as `endorsementSetupLedger2.py` does). As of 2026-11
+> (Stax, SE 1.6.2, `perso_11`, `attest_1`) the HSM still opens the secure
+> channel and has the device create the slot key, but then sends a commit
+> **without a certificate**. lsdk refuses to forward it, because the device
+> would store the empty certificate and keep the slot unusable until
+> `lsdk endorse reset`. Like every vendor HSM session, it is refused while a
+> custom CA is installed.
 
 ### Sideloading apps (app development)
 

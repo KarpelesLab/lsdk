@@ -190,7 +190,9 @@ impl Manager {
                 ("endorseScheme", &scheme),
             ],
         );
-        Ok(hsm::run(device.transport(), &url, on_event).await?.result)
+        Ok(hsm::run_legacy(device.transport(), &url, on_event)
+            .await?
+            .result)
     }
 
     /// List installed apps through the HSM (alternative to [`Device::list_apps`]).
