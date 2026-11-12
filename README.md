@@ -199,8 +199,15 @@ lsdk recover delete -c conf.json shares/DeleteBackup_*.json
 lsdk ca remove --recover --name "backup CA"    # vendor app installs fail while a CA is set
 ```
 
-Files use the formats of the vendor's legacy tooling. Shares are secrets:
-store them encrypted and apart.
+Files use the formats of the vendor's legacy tooling. The device encrypts the
+seed with a key common to all devices before splitting it, so shares can only
+be restored through a device; still keep them private and apart.
+
+**Restoring:** setting the PIN during onboarding erases the custom CA, so:
+wipe the device, onboard it (PIN, then "restore from a backup"), reboot into
+recovery mode, `lsdk ca install`, then `lsdk recover restore` while still in
+recovery mode (the restore step survives the reboot), and `lsdk ca remove
+--recover` afterwards. The PIN may differ from the one used at backup time.
 
 ### Linux: udev rules
 

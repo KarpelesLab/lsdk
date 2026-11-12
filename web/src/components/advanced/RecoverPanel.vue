@@ -137,7 +137,8 @@ const del = () => guard(async () => {
     <div v-if="conf" class="grid cols-2">
       <div class="panel">
         <h2>Restore</h2>
-        <p class="muted small-text" style="margin-top:0">On a device being set up with "restore from a backup". Select 2 or 3 share files.</p>
+        <p class="muted small-text" style="margin-top:0">Onboard the device (PIN, then "restore from a backup"): this erases the custom CA, so reboot into
+          recovery mode, install the CA again (Developer tab) and restore from there. Select 2 or 3 share files.</p>
         <input type="file" accept=".json" multiple @change="pickRestore" />
         <div class="row" style="margin-top:8px"><button class="primary" :disabled="!!state.busy || restoreFiles.length < 2 || !caKey" @click="restore">Restore ({{ restoreFiles.length }})</button></div>
       </div>
