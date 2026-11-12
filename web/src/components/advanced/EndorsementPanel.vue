@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { state, run, log, errorText } from '../../lib/store.js'
+import { state, run, log, errorText, hsmEvent } from '../../lib/store.js'
 import { rootPublicKey } from '../../pkg/lsdk.js'
 
 const error = ref(null)
@@ -43,13 +43,24 @@ const setup = () => guard(async () => {
   log('ok', `slot ${slot.value} endorsed`)
   await read(Number(slot.value))
 })
+
+// Vendor endorsement: the vendor HSM certifies the slot key (no owner key needed).
+const setupVendor = () => guard(async () => {
+  const n = Number(slot.value)
+  if (!confirm(`Have the vendor HSM create and certify the endorsement key of slot ${n}? This replaces any key already in the slot.`)) return
+  result.value = await run(`vendor endorse slot ${n}`, (d) => d.endorseVendor(n, hsmEvent))
+  info.value = { ...info.value, [n]: result.value }
+  log('ok', `slot ${n} endorsed by the vendor`)
+})
 </script>
 
 <template>
   <div class="grid">
     <p class="note" style="margin:0">
-      Endorsement keys let apps prove they run on this device, certified by <b>your</b> owner key: the device creates
-      the key (signed by its attestation key), you sign it (sha256(0xFE ‖ key)) and the certificate is stored in the slot.
+      Endorsement keys let apps prove they run on this device, certified either by <b>your</b> owner key or by the
+      vendor. The device creates the key (signed by its attestation key), the owner signs it (sha256(0xFE ‖ key)) and the
+      certificate is stored in the slot. With <b>vendor endorsement</b>, the vendor HSM does the signing over a secure
+      channel, so third parties can check the key belongs to a genuine device.
     </p>
     <p v-if="error" class="error">{{ error }}</p>
     <div class="panel">
@@ -76,6 +87,7 @@ const setup = () => guard(async () => {
       </div>
       <div class="row" style="margin-top:10px">
         <button class="primary" :disabled="!!state.busy || !ownerKey" @click="setup">Create &amp; certify</button>
+        <button :disabled="!!state.busy" @click="setupVendor">Vendor endorsement (HSM)</button>
         <div class="spacer"></div>
         <button class="danger" :disabled="!!state.busy" @click="reset">Reset endorsement</button>
       </div>

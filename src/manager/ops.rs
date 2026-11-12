@@ -23,6 +23,9 @@ fn is_already_installed(sw: crate::apdu::StatusWord) -> bool {
 /// Expected HSM result for a genuine device.
 pub const GENUINE_RESULT: &str = "0000";
 
+/// Vendor endorsement owner key reference used by [`Manager::vendor_endorse`].
+pub const VENDOR_ENDORSEMENT_KEY: &str = "attest_1";
+
 /// Manager API + HSM endpoints.
 #[derive(Clone, Debug)]
 pub struct Manager {
@@ -156,6 +159,38 @@ impl Manager {
         );
         let out = hsm::run(device.transport(), &url, on_event).await?;
         Ok(out.result.as_ref().and_then(|v| v.as_str()) == Some(GENUINE_RESULT))
+    }
+
+    /// Vendor endorsement: the HSM opens a secure channel, has the device
+    /// generate the endorsement key of `slot` and stores a certificate signed
+    /// by the vendor's own endorsement owner key (`endorse`, default
+    /// [`VENDOR_ENDORSEMENT_KEY`]). Apps can then prove to third parties that
+    /// they run on a genuine device. This replaces any key already in the slot.
+    pub async fn vendor_endorse<T: Transport>(
+        &self,
+        device: &Device<T>,
+        slot: crate::os::EndorsementSlot,
+        endorse: Option<&str>,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<Option<serde_json::Value>> {
+        self.ensure_dashboard(device).await?;
+        let ctx = self.firmware_context(device).await?;
+        let fw = ctx
+            .firmware
+            .ok_or_else(|| Error::App("device is updating its firmware".into()))?;
+        let target = ctx.os.target_id.to_string();
+        let scheme = (slot as u8).to_string();
+        let url = hsm::build_url(
+            &self.hsm_url,
+            "/endorse",
+            &[
+                ("targetId", &target),
+                ("perso", &fw.perso),
+                ("endorse", endorse.unwrap_or(VENDOR_ENDORSEMENT_KEY)),
+                ("endorseScheme", &scheme),
+            ],
+        );
+        Ok(hsm::run(device.transport(), &url, on_event).await?.result)
     }
 
     /// List installed apps through the HSM (alternative to [`Device::list_apps`]).

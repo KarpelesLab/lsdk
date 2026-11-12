@@ -195,7 +195,7 @@ enum LangCmd {
 enum EndorseCmd {
     /// Show the endorsement key of a slot (1 or 2).
     Info { slot: u8 },
-    /// Create the slot key and certify it with your owner key.
+    /// Create the slot key and certify it (your owner key, or --vendor).
     Setup {
         slot: u8,
         /// Owner private key file (default: the lsdk CA key).
@@ -204,6 +204,12 @@ enum EndorseCmd {
         /// Use this DER certificate (hex) instead of signing with the owner key.
         #[arg(long)]
         certificate: Option<String>,
+        /// Have the vendor HSM certify the key instead (vendor endorsement).
+        #[arg(long, conflicts_with_all = ["owner_key", "certificate"])]
+        vendor: bool,
+        /// Vendor endorsement owner key reference (with --vendor).
+        #[arg(long, requires = "vendor", default_value = "attest_1")]
+        vendor_key: String,
     },
     /// Erase the endorsement keys (secure channel, confirmed on device).
     Reset {
@@ -812,8 +818,24 @@ async fn run(cli: Cli) -> Result<()> {
                 EndorseCmd::Info { slot: n } => print(&d.endorsement_info(slot(*n)?).await?),
                 EndorseCmd::Setup {
                     slot: n,
+                    vendor: true,
+                    vendor_key,
+                    ..
+                } => {
+                    let result = manager
+                        .vendor_endorse(&d, slot(*n)?, Some(vendor_key), &mut progress)
+                        .await?;
+                    if let Some(r) = result.filter(|r| !r.is_null()) {
+                        eprintln!("HSM result: {r}");
+                    }
+                    print(&d.endorsement_info(slot(*n)?).await?);
+                    println!("slot {n} endorsed by the vendor");
+                }
+                EndorseCmd::Setup {
+                    slot: n,
                     owner_key,
                     certificate,
+                    ..
                 } => {
                     let (public, _device_sig) = d.endorse_start(slot(*n)?).await?;
                     eprintln!("endorsement key: {}", hex::encode(&public));

@@ -19,7 +19,8 @@ USB HID natively or through WebHID in the browser.
   Bluetooth MAC, language packs, screensaver, raw APDUs
 * **Dashboard secure channel**: custom CA (regular and Recover channels),
   **sideloading apps from their ELF**, memory info, delete apps, firmware hash;
-  endorsement keys, host onboarding (test devices) and factory commands
+  endorsement keys (your owner key, or vendor endorsement through the HSM),
+  host onboarding (test devices) and factory commands
 * **App clients** to derive addresses, **generate transactions**
   (with [outscript](https://crates.io/crates/outscript)) and sign them on the
   device: Ethereum / EVM, Bitcoin (PSBT, wallet policies), Solana
@@ -139,7 +140,7 @@ lsdk apps
 lsdk install Bitcoin
 lsdk firmware check
 lsdk lang available | lsdk lang install french
-lsdk endorse info 1 | lsdk endorse setup 1
+lsdk endorse info 1 | lsdk endorse setup 1   # or --vendor: certified by the vendor HSM
 lsdk firmware hash | lsdk app delete-all
 lsdk eth address --display
 lsdk eth sign-tx --nonce 0 --to 0x... --value 0.01 --max-fee 30

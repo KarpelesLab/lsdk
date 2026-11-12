@@ -757,6 +757,19 @@ impl HwDevice {
         )
     }
 
+    /// Vendor endorsement of slot 1 or 2: the HSM has the device create the
+    /// slot key and certifies it with the vendor's endorsement owner key.
+    /// Returns the slot info afterwards.
+    #[wasm_bindgen(js_name = endorseVendor)]
+    pub async fn endorse_vendor(&self, slot: u8, on_event: Option<Function>) -> JsResult<JsValue> {
+        let slot = endorsement_slot(slot)?;
+        self.manager()
+            .vendor_endorse(&self.device, slot, None, &mut emitter(on_event))
+            .await
+            .map_err(js_err)?;
+        to_js(&self.device.endorsement_info(slot).await.map_err(js_err)?)
+    }
+
     // ---- Secure channel (custom CA, sideloading) ----
 
     /// Install a custom CA (recovery mode). `recover` uses the Recover channel.
