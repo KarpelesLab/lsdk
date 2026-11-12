@@ -132,18 +132,6 @@ pub fn recover_generate_config(user: JsValue, backup_name: String) -> JsResult<J
     to_js(&crate::recover::RecoverConfig::generate(user, &backup_name).map_err(js_err)?)
 }
 
-/// Rebuild the recovery phrase from 2 or 3 `Backup_N.json` files (parsed
-/// JSON objects), offline: no device, CA or `conf.json`. Every share is
-/// checked against its commitments first.
-#[wasm_bindgen(js_name = recoverCombine)]
-pub fn recover_combine(backups: JsValue) -> JsResult<String> {
-    let files: Vec<std::collections::BTreeMap<String, crate::recover::ShareBackup>> =
-        from_js(backups)?;
-    let shares: Vec<_> = files.into_iter().flat_map(|f| f.into_values()).collect();
-    let entropy = crate::recover::combine(&shares).map_err(js_err)?;
-    crate::recover::bip39_phrase(&entropy).map_err(js_err)
-}
-
 /// Generate a CA / root key. Returns `{ privateKey, publicKey }` (hex).
 #[wasm_bindgen(js_name = generateRootKey)]
 pub fn generate_root_key() -> JsResult<JsValue> {

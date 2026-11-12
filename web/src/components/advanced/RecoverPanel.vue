@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
 import { state, run, log, errorText } from '../../lib/store.js'
-import { recoverGenerateConfig, recoverCombine } from '../../pkg/lsdk.js'
+import { recoverGenerateConfig } from '../../pkg/lsdk.js'
 
 const error = ref(null)
 const conf = ref(null)
@@ -13,8 +13,6 @@ const caKey = ref(storedKey)
 const results = ref(null)
 const restoreFiles = ref([])
 const deleteFiles = ref([])
-const combineFiles = ref([])
-const phrase = ref(null)
 
 const onboarded = computed(() => state.info?.version?.flags?.isOnboarded)
 
@@ -78,13 +76,6 @@ const pickFiles = (target) => async (e) => {
 }
 const pickRestore = pickFiles(restoreFiles)
 const pickDelete = pickFiles(deleteFiles)
-const pickCombine = async (e) => { phrase.value = null; await pickFiles(combineFiles)(e) }
-
-// Offline: no device, CA or conf.json. The phrase is never logged.
-const rebuild = () => guard(async () => {
-  phrase.value = recoverCombine(combineFiles.value).split(' ')
-  log('info', `recovery phrase rebuilt offline from ${combineFiles.value.length} share files`)
-})
 
 const restore = () => guard(async () => {
   await run('seed restore', (d) => d.recoverRestore(conf.value, caKey.value.trim(), restoreFiles.value, events))
@@ -102,8 +93,8 @@ const del = () => guard(async () => {
   <div class="grid">
     <p class="note" style="margin:0">
       Self-hosted seed backup with the device's Recover protocol: <b>you are the backup service</b>. The seed is split
-      into 3 shares (any 2 restore it), each handed to a "provider" certified by your custom CA. The shares travel
-      encrypted, but the downloaded share files are not: <b>any two of them reveal your seed</b>. Requirements:
+      into 3 shares (any 2 restore it), each handed to a "provider" certified by your custom CA. What is split is the
+      seed encrypted with a key common to all devices, so restoring always needs a device. Requirements:
       your CA installed <b>through the Recover channel</b> (Developer tab, recovery mode). While a custom CA is
       installed, installing apps from the vendor fails: remove it when done.
     </p>
@@ -143,22 +134,6 @@ const del = () => guard(async () => {
       </div>
     </div>
 
-    <div class="panel">
-      <h2>Rebuild the recovery phrase offline</h2>
-      <p class="muted small-text" style="margin-top:0">
-        From 2 or 3 share files (<code>Backup_N.json</code>), without a device, CA or <code>conf.json</code>: each share is
-        checked against its commitments, then combined in this page. Nothing is sent anywhere. Best done on an offline computer.
-      </p>
-      <input type="file" accept=".json" multiple @change="pickCombine" />
-      <div class="row" style="margin-top:8px">
-        <button class="primary" :disabled="combineFiles.length < 2" @click="rebuild">Rebuild ({{ combineFiles.length }})</button>
-        <button v-if="phrase" class="small" @click="phrase = null">Hide</button>
-      </div>
-      <ol v-if="phrase" class="phrase mono">
-        <li v-for="(w, i) in phrase" :key="i">{{ w }}</li>
-      </ol>
-    </div>
-
     <div v-if="conf" class="grid cols-2">
       <div class="panel">
         <h2>Restore</h2>
@@ -175,7 +150,3 @@ const del = () => guard(async () => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.phrase { columns: 4 8em; margin: 10px 0 0; padding-left: 2.2em; }
-</style>
