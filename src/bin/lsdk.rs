@@ -10,6 +10,7 @@ use lsdk::hsm::HsmEvent;
 use lsdk::manager::Manager;
 use lsdk::path::DerivationPath;
 use lsdk::transport::hid::HidTransport;
+use lsdk::transport::tcp::TcpTransport;
 use lsdk::{Device, Error, Result};
 use serde::Serialize;
 
@@ -28,6 +29,10 @@ struct Cli {
     #[cfg(target_os = "linux")]
     #[arg(long, global = true)]
     usbfs: bool,
+    /// Talk to a device over TCP (Speculos's APDU protocol, e.g. Speculos or
+    /// ledger_console) at host:port instead of USB.
+    #[arg(long, global = true)]
+    tcp: Option<String>,
     /// Manager API base URL.
     #[arg(long, global = true, default_value = lsdk::manager::api::DEFAULT_BASE_URL)]
     api: String,
@@ -665,7 +670,39 @@ fn progress(ev: HsmEvent) {
     }
 }
 
-fn open(cli: &Cli) -> Result<Device<HidTransport>> {
+/// The transport `open` picked: USB HID, or TCP with `--tcp`.
+enum Link {
+    Hid(HidTransport),
+    Tcp(TcpTransport),
+}
+
+impl Link {
+    fn product(&self) -> Option<String> {
+        match self {
+            Link::Hid(t) => t.info().product.clone(),
+            Link::Tcp(_) => None,
+        }
+    }
+
+    /// Legacy HW.1 / original Nano (never over TCP).
+    fn legacy(&self) -> bool {
+        matches!(self, Link::Hid(t) if t.info().legacy)
+    }
+}
+
+impl lsdk::Transport for Link {
+    async fn exchange(&self, apdu: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Link::Hid(t) => t.exchange(apdu).await,
+            Link::Tcp(t) => t.exchange(apdu).await,
+        }
+    }
+}
+
+fn open(cli: &Cli) -> Result<Device<Link>> {
+    if let Some(addr) = &cli.tcp {
+        return Ok(Device::new(Link::Tcp(TcpTransport::connect(addr.as_str())?)));
+    }
     let list = HidTransport::list()?;
     let info = match &cli.device {
         Some(path) => list.into_iter().find(|d| &d.path == path),
@@ -683,11 +720,11 @@ fn open(cli: &Cli) -> Result<Device<HidTransport>> {
     if t.backend() == "usbfs" && !cli.usbfs_quiet() {
         eprintln!("note: {} is not accessible, using raw USB", info.path);
     }
-    Ok(Device::new(t))
+    Ok(Device::new(Link::Hid(t)))
 }
 
 /// Unlock a HW.1 with --pin, refusing to burn the last attempt blindly.
-async fn hw1_unlock(w: &btchip::BtchipWallet<'_, HidTransport>, pin: &str) -> Result<()> {
+async fn hw1_unlock<T: lsdk::Transport>(w: &btchip::BtchipWallet<'_, T>, pin: &str) -> Result<()> {
     match w.pin_attempts().await? {
         None => {
             return Err(Error::App(
@@ -705,7 +742,7 @@ async fn hw1_unlock(w: &btchip::BtchipWallet<'_, HidTransport>, pin: &str) -> Re
 /// Keyboard confirmation: the user power cycles the dongle, which types a
 /// summary and a code, then plugs it back. Returns the code and the reopened
 /// device.
-fn hw1_confirm(cli: &Cli, c: &btchip::Confirmation) -> Result<(String, Device<HidTransport>)> {
+fn hw1_confirm(cli: &Cli, c: &btchip::Confirmation) -> Result<(String, Device<Link>)> {
     if c.kind != 0x01 {
         return Err(Error::App(format!(
             "confirmation type 0x{:02x} (security card / secure screen) is not supported, only keyboard confirmation",
@@ -1058,7 +1095,7 @@ struct Hw1Info {
     attestation: Option<btchip::Attestation>,
 }
 
-async fn hw1_info(d: &Device<HidTransport>) -> Result<Hw1Info> {
+async fn hw1_info(d: &Device<Link>) -> Result<Hw1Info> {
     let w = btchip::BtchipWallet::new(d);
     let firmware = w.firmware().await?;
     let operation_mode = w.operation_mode().await?;
@@ -1072,7 +1109,7 @@ async fn hw1_info(d: &Device<HidTransport>) -> Result<Hw1Info> {
     blob.copy_from_slice(&seed.to_le_bytes()[..8]);
     Ok(Hw1Info {
         family: "BTChip (HW.1 / Nano 2014)",
-        product: d.transport().info().product.clone(),
+        product: d.transport().product(),
         set_up: operation_mode.is_some(),
         firmware,
         operation_mode,
@@ -1102,7 +1139,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::List => print(&HidTransport::list()?),
         Cmd::Info => {
             let d = open(&cli)?;
-            if d.transport().info().legacy {
+            if d.transport().legacy() {
                 print(&hw1_info(&d).await?);
                 return Ok(());
             }
@@ -2088,7 +2125,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => hw1_update(&cli, *dry_run, *erase, firmware_dir).await?,
         Cmd::Hw1 { cmd } => {
             let d = open(&cli)?;
-            if !d.transport().info().legacy {
+            if !d.transport().legacy() {
                 return Err(Error::InvalidInput(
                     "not a HW.1 / original Nano (BTChip, USB vendor 0x2581)".into(),
                 ));

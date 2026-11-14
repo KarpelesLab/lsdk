@@ -12,6 +12,9 @@ pub mod webhid;
 
 pub mod mock;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tcp;
+
 /// A channel to a device able to exchange APDUs.
 ///
 /// `exchange` sends a fully encoded APDU (`CLA INS P1 P2 Lc data`) and returns
