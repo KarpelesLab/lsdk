@@ -455,6 +455,11 @@ enum AppCmd {
         /// than API levels (e.g. Nano S Plus 1.0.x, which answers 0x6512).
         #[arg(long)]
         legacy_layout: bool,
+        /// Firmware before 1.4 (e.g. Nano S 1.3.x): dashboard icon, hex
+        /// (`icon.py <gif> hexbitmaponly`). Defaults to the icon of the
+        /// install parameters, if any.
+        #[arg(long)]
+        icon: Option<String>,
     },
     /// Delete an app by name (or --hash).
     Delete {
@@ -701,7 +706,9 @@ impl lsdk::Transport for Link {
 
 fn open(cli: &Cli) -> Result<Device<Link>> {
     if let Some(addr) = &cli.tcp {
-        return Ok(Device::new(Link::Tcp(TcpTransport::connect(addr.as_str())?)));
+        return Ok(Device::new(Link::Tcp(TcpTransport::connect(
+            addr.as_str(),
+        )?)));
     }
     let list = HidTransport::list()?;
     let info = match &cli.device {
@@ -1679,7 +1686,13 @@ async fn run(cli: Cli) -> Result<()> {
                 data_size,
                 install_params_size,
                 legacy_layout,
+                icon,
             } => {
+                let icon = icon
+                    .as_deref()
+                    .map(hex::decode)
+                    .transpose()
+                    .map_err(|e| Error::InvalidInput(format!("--icon: {e}")))?;
                 let raw = std::fs::read(file)
                     .map_err(|e| Error::InvalidInput(format!("{}: {e}", file.display())))?;
                 let mut img = if raw.starts_with(b"\x7fELF") {
@@ -1739,6 +1752,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let opts = lsdk::loader::InstallOptions {
                     replace: !no_replace,
                     signer: signer.as_ref(),
+                    icon: icon.as_deref(),
                 };
                 lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
                     eprint!("\r> loading {sent}/{total}");

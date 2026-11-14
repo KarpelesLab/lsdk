@@ -1167,7 +1167,11 @@ impl HwDevice {
         } else {
             None
         };
-        let opts = crate::loader::InstallOptions { replace, signer };
+        let opts = crate::loader::InstallOptions {
+            replace,
+            signer,
+            icon: None,
+        };
         crate::loader::install_app_with(&mut chan, &img, &opts, &mut progress)
             .await
             .map_err(js_err)

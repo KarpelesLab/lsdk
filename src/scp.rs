@@ -230,6 +230,18 @@ enum Session {
     Recover {
         siv: AesSiv,
     },
+    /// Pre-1.4 firmware (target ids ending in 2, e.g. Nano S 1.3.x): the
+    /// key is the ECDH secret's first 16 bytes, one CBC chain for both
+    /// directions and no MAC.
+    V2 {
+        enc: Aes128,
+        iv: [u8; 16],
+    },
+}
+
+/// Whether a target id uses the pre-1.4 channel and app layout.
+pub fn is_pre_1_4(target_id: u32) -> bool {
+    target_id & 0xf == 0x2
 }
 
 /// Recover-style AES-SIV key between a host private key and a device public
@@ -303,6 +315,45 @@ fn derive_key(secret: &[u8; 32], index: u32) -> Result<[u8; 16]> {
         }
     }
     Err(Error::App("key derivation failed".into()))
+}
+
+/// ISO 7816-4 padding then AES-CBC, chaining `iv`.
+fn cbc_encrypt(enc: &Aes128, iv: &mut [u8; 16], plain: &[u8]) -> Vec<u8> {
+    let mut data = plain.to_vec();
+    data.push(0x80);
+    while !data.len().is_multiple_of(16) {
+        data.push(0);
+    }
+    for chunk in data.chunks_mut(16) {
+        let mut block: [u8; 16] = chunk.try_into().unwrap();
+        xor16(&mut block, iv);
+        enc.encrypt_block(&mut block);
+        chunk.copy_from_slice(&block);
+        *iv = block;
+    }
+    data
+}
+
+/// AES-CBC decrypt chaining `iv`, then strip ISO 7816-4 padding.
+fn cbc_decrypt(enc: &Aes128, iv: &mut [u8; 16], data: &[u8]) -> Result<Vec<u8>> {
+    if !data.len().is_multiple_of(16) {
+        return Err(Error::InvalidResponse("bad secure response length".into()));
+    }
+    let mut out = Vec::with_capacity(data.len());
+    for chunk in data.chunks(16) {
+        let c: [u8; 16] = chunk.try_into().unwrap();
+        let mut block = c;
+        enc.decrypt_block(&mut block);
+        xor16(&mut block, iv);
+        *iv = c;
+        out.extend_from_slice(&block);
+    }
+    let end = out
+        .iter()
+        .rposition(|b| *b == 0x80)
+        .ok_or_else(|| Error::InvalidResponse("bad padding".into()))?;
+    out.truncate(end);
+    Ok(out)
 }
 
 fn xor16(a: &mut [u8; 16], b: &[u8]) {
@@ -451,6 +502,16 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             let static_cert = open(&static_cert)?;
             dev_eph_sig = open(&dev_eph_sig)?;
             (Session::Recover { siv }, static_cert)
+        } else if is_pre_1_4(version.target_id) {
+            let secret = ecdh_secret(&RootKeyScalar(scalar), &dev_eph)?;
+            let key: [u8; 16] = secret[..16].try_into().unwrap();
+            (
+                Session::V2 {
+                    enc: Aes128::new(&key),
+                    iv: [0; 16],
+                },
+                static_cert,
+            )
         } else {
             let secret = ecdh_secret(&RootKeyScalar(scalar), &dev_eph)?;
             let enc = Aes128::new(&derive_key(&secret, 0)?);
@@ -493,7 +554,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
     /// Channel flavor.
     pub fn mode(&self) -> ScpMode {
         match self.session {
-            Session::Default { .. } => ScpMode::Default,
+            Session::Default { .. } | Session::V2 { .. } => ScpMode::Default,
             Session::Recover { .. } => ScpMode::Recover,
         }
     }
@@ -501,6 +562,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
     fn wrap(&mut self, plain: &[u8]) -> Vec<u8> {
         let (enc, mac, enc_iv, mac_iv) = match &mut self.session {
             Session::Recover { siv } => return siv.seal(&[], plain),
+            Session::V2 { enc, iv } => return cbc_encrypt(enc, iv, plain),
             Session::Default {
                 enc,
                 mac,
@@ -537,6 +599,7 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             return Ok(Vec::new());
         }
         let (enc, mac, enc_iv, mac_iv) = match &mut self.session {
+            Session::V2 { enc, iv } => return cbc_decrypt(enc, iv, data),
             Session::Recover { siv } => {
                 return siv
                     .open(&[], data)
@@ -589,6 +652,14 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
         if plain.len() > 239 {
             return Err(Error::InvalidInput("secure command too long".into()));
         }
+        if std::env::var_os("LSDK_DEBUG").is_some() {
+            eprintln!(
+                "> sec e000 {:02x} len={}: {}",
+                ins,
+                data.len(),
+                hex::encode(&data[..data.len().min(40)])
+            );
+        }
         let wrapped = self.wrap(&plain);
         let r = self
             .device
@@ -630,8 +701,26 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
     pub async fn list_apps(&mut self) -> Result<Vec<SecureAppEntry>> {
         let mut out = Vec::new();
         let mut d = self.exchange(ins::LIST_APPS, &[]).await?;
+        let old = matches!(self.session, Session::V2 { .. });
         while !d.is_empty() {
             let mut r = Reader::new(&d);
+            if old {
+                // Before 1.4: entries of size(1), name LV, flags(4), hash(32).
+                while !r.is_empty() {
+                    let _entry_size = r.u8()?;
+                    let name = r.lv_string()?;
+                    let flags = r.u32()?;
+                    let hash = hex::encode(r.bytes(32)?);
+                    out.push(SecureAppEntry {
+                        name,
+                        flags,
+                        hash_code_data: String::new(),
+                        hash,
+                    });
+                }
+                d = self.exchange(ins::LIST_APPS_CONTINUE, &[]).await?;
+                continue;
+            }
             if r.u8()? != 1 {
                 return Err(Error::InvalidResponse("unknown list format".into()));
             }

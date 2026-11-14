@@ -298,6 +298,69 @@ impl AppImage {
 }
 
 impl AppImage {
+    /// The install parameters block (TLVs at the end of the image).
+    pub fn install_params(&self) -> Vec<u8> {
+        let img = self.flat_image();
+        let n = (self.install_params_size as usize).min(img.len());
+        img[img.len() - n..].to_vec()
+    }
+
+    /// The icon from the install parameters (tag 3), if any.
+    pub fn install_params_icon(&self) -> Option<Vec<u8>> {
+        let p = self.install_params();
+        let mut i = 0;
+        while i + 2 <= p.len() {
+            let tag = p[i];
+            let (len, hdr) = match p[i + 1] {
+                n if n < 0x80 => (n as usize, 2),
+                0x81 => (*p.get(i + 2)? as usize, 3),
+                0x82 => (
+                    u16::from_be_bytes([*p.get(i + 2)?, *p.get(i + 3)?]) as usize,
+                    4,
+                ),
+                _ => return None,
+            };
+            let v = p.get(i + hdr..i + hdr + len)?;
+            if tag == 3 {
+                return Some(v.to_vec());
+            }
+            i += hdr + len;
+        }
+        None
+    }
+
+    /// `CREATE_APP` payload for firmware before 1.4 (e.g. Nano S 1.3.x):
+    /// whole length (code and data), flags, name, inline icon and a
+    /// derivation restriction (`ff`: any curve, no path). Install
+    /// parameters are not part of this layout and are left out.
+    pub fn create_app_params_pre_1_4(&self, icon: &[u8]) -> Result<Vec<u8>> {
+        if icon.len() > 255 || self.name.len() > 255 {
+            return Err(Error::InvalidInput("app name or icon too long".into()));
+        }
+        let len = self.image_size() - self.install_params_size;
+        let mut d = len.to_be_bytes().to_vec();
+        d.extend_from_slice(&self.flags.to_be_bytes());
+        d.push(self.name.len() as u8);
+        d.extend_from_slice(self.name.as_bytes());
+        d.push(icon.len() as u8);
+        d.extend_from_slice(icon);
+        d.extend_from_slice(&[0x01, 0xff]);
+        Ok(d)
+    }
+
+    /// The image without its install parameters block.
+    fn without_install_params(&self) -> AppImage {
+        let mut img = self.clone();
+        let end = self.min_address() + self.image_size() - self.install_params_size;
+        img.areas.retain(|a| a.address < end);
+        for a in &mut img.areas {
+            let max = (end - a.address) as usize;
+            a.data.truncate(max);
+        }
+        img.install_params_size = 0;
+        img
+    }
+
     /// The image as loaded: `min_address..end`, gaps zero-filled.
     pub fn flat_image(&self) -> Vec<u8> {
         let min = self.min_address();
@@ -347,6 +410,9 @@ pub struct InstallOptions<'a> {
     pub replace: bool,
     /// Sign the app hash with this key (sent with `COMMIT`).
     pub signer: Option<&'a crate::scp::RootKey>,
+    /// Icon for firmware before 1.4 (bitmap as `icon.py hexbitmaponly`);
+    /// defaults to the icon of the install parameters.
+    pub icon: Option<&'a [u8]>,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -362,7 +428,7 @@ pub async fn install_app<T: Transport>(
         image,
         &InstallOptions {
             replace,
-            signer: None,
+            ..Default::default()
         },
         on_progress,
     )
@@ -391,8 +457,27 @@ pub async fn install_app_with<T: Transport>(
             Err(e) => return Err(e),
         }
     }
-    chan.exchange(ins::CREATE_APP, &image.create_app_params()?)
-        .await?;
+    let pre_1_4 = crate::scp::is_pre_1_4(chan.version.target_id);
+    let stripped;
+    let image = if pre_1_4 {
+        if opts.signer.is_some() {
+            return Err(Error::InvalidInput(
+                "signed sideloading is not supported on firmware before 1.4".into(),
+            ));
+        }
+        let icon = match opts.icon {
+            Some(i) => i.to_vec(),
+            None => image.install_params_icon().unwrap_or_default(),
+        };
+        chan.exchange(ins::CREATE_APP, &image.create_app_params_pre_1_4(&icon)?)
+            .await?;
+        stripped = image.without_install_params();
+        &stripped
+    } else {
+        chan.exchange(ins::CREATE_APP, &image.create_app_params()?)
+            .await?;
+        image
+    };
     let total: usize = image.areas.iter().map(|a| a.data.len()).sum();
     let mut sent = 0;
     let min = image.min_address();
@@ -415,14 +500,19 @@ pub async fn install_app_with<T: Transport>(
             chan.exchange(ins::CRC, &crc).await?;
         }
     }
-    let commit = match opts.signer {
-        Some(key) => {
-            let sig = key.sign_digest(&image.app_hash(chan.version.target_id)?)?;
-            let mut d = vec![sig.len() as u8];
-            d.extend(sig);
-            d
+    let commit = if pre_1_4 {
+        // Before 1.4, COMMIT ("boot") carries the entry point offset.
+        ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec()
+    } else {
+        match opts.signer {
+            Some(key) => {
+                let sig = key.sign_digest(&image.app_hash(chan.version.target_id)?)?;
+                let mut d = vec![sig.len() as u8];
+                d.extend(sig);
+                d
+            }
+            None => Vec::new(),
         }
-        None => Vec::new(),
     };
     chan.exchange(ins::COMMIT, &commit).await?;
     Ok(())
