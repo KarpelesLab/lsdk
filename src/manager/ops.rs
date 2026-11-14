@@ -458,6 +458,53 @@ impl Manager {
         }
     }
 
+    /// Whether [`Self::install_final_firmware`] is needed after the OS updater
+    /// (and MCU): devices whose final firmware has its own image (Nano S).
+    pub fn needs_final_install(update: &FirmwareUpdate) -> bool {
+        update.final_firmware.firmware.is_some()
+    }
+
+    /// Last step on devices where [`Self::needs_final_install`]: with the device
+    /// running the OS updater (it shows "Update"), install the final firmware.
+    pub async fn install_final_firmware<T: Transport>(
+        &self,
+        device: &Device<T>,
+        update: &FirmwareUpdate,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<()> {
+        let os = device.get_version().await?;
+        if !os.is_osu {
+            return Err(Error::App(
+                "the device is not running the OS updater (it should show \"Update\")".into(),
+            ));
+        }
+        let f = &update.final_firmware;
+        let (firmware, key) = match (&f.firmware, &f.firmware_key) {
+            (Some(fw), Some(k)) => (fw, k),
+            _ => {
+                return Err(Error::App(
+                    "this final firmware has no separate image to install".into(),
+                ));
+            }
+        };
+        let target = os.target_id.to_string();
+        let url = hsm::build_url(
+            &self.hsm_url,
+            "/install",
+            &[
+                ("targetId", &target),
+                ("perso", &f.perso),
+                ("firmware", firmware),
+                ("firmwareKey", key),
+            ],
+        );
+        match hsm::run(device.transport(), &url, on_event).await {
+            // The device reboots at the end, losing the link is expected.
+            Ok(_) | Err(Error::Disconnected) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Step 2 (only when [`FirmwareUpdate::should_flash_mcu`]): with the device in
     /// bootloader mode, flash the MCU or the bootloader. Repeat (reopening the
     /// transport each time) while the device stays in bootloader mode.

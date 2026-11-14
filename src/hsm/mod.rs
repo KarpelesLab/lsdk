@@ -243,8 +243,17 @@ async fn run_inner<T: Transport + ?Sized>(
                 on_event(HsmEvent::Progress { index: 0, total });
                 for (i, apdu) in list.iter().enumerate() {
                     let resp = Response::from_raw(transport.exchange(apdu).await?)?;
+                    on_event(HsmEvent::Exchange {
+                        apdu: apdu.clone(),
+                        status: resp.sw.0,
+                    });
                     if !resp.sw.is_ok() {
-                        return Err(map_device_error(resp.sw));
+                        let e = map_device_error(resp.sw);
+                        return Err(Error::Hsm(format!(
+                            "{e} at bulk APDU {}/{total} ({}...)",
+                            i + 1,
+                            hex::encode(&apdu[..apdu.len().min(5)])
+                        )));
                     }
                     on_event(HsmEvent::Progress {
                         index: i + 1,

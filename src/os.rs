@@ -429,7 +429,9 @@ impl OsVersion {
         let mut r = Reader::new(data);
         let target_id = r.u32()?;
         let mut raw_version = String::from_utf8_lossy(r.opt_lv()?.unwrap_or_default()).into_owned();
-        let mut se_flags = r.opt_lv()?.unwrap_or_default().to_vec();
+        // Lenient: an old Nano S bootloader (0.7) declares 8 flag bytes and
+        // sends 3.
+        let mut se_flags = r.opt_lv_lenient()?.unwrap_or_default().to_vec();
         if raw_version.is_empty() {
             raw_version = "0.0.0".into();
             se_flags.clear();
@@ -807,6 +809,16 @@ mod tests {
             SeFlags::parse(&[0x62, 0, 0, 0]).onboarding_step,
             "welcomeScreen1"
         );
+    }
+
+    #[test]
+    fn parse_version_nanos_bootloader_short_flags() {
+        // Nano S bootloader 0.7: declares 8 flag bytes, sends 3.
+        let d = hex::decode("0100000103302e370800300090").unwrap();
+        let v = OsVersion::parse(&d[..d.len() - 1]).unwrap();
+        assert!(v.is_bootloader);
+        assert_eq!(v.mcu_bootloader_version, "0.7");
+        assert_eq!(v.mcu_target_id, Some(0x0100_0001));
     }
 
     #[test]

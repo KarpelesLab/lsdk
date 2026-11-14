@@ -275,6 +275,16 @@ impl<'a> Reader<'a> {
         self.bytes(n)
     }
 
+    /// Read a length-prefixed field, taking what is left when the field is
+    /// shorter than declared (`None` if nothing is left).
+    pub fn opt_lv_lenient(&mut self) -> Result<Option<&'a [u8]>> {
+        if self.is_empty() {
+            return Ok(None);
+        }
+        let n = (self.u8()? as usize).min(self.remaining());
+        self.bytes(n).map(Some)
+    }
+
     /// Read a length-prefixed field, `None` if nothing is left.
     pub fn opt_lv(&mut self) -> Result<Option<&'a [u8]>> {
         if self.is_empty() {

@@ -1808,40 +1808,140 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Firmware { cmd } => {
             let d = open(&cli)?;
             let os = d.get_version().await?;
-            if os.is_bootloader || matches!(cmd, FirmwareCmd::Repair) {
+            // An update interrupted in bootloader mode resumes from its saved
+            // plan: old bootloaders don't report the target firmware.
+            let pending_path = config_dir().join("pending-update.json");
+            let pending: Option<lsdk::manager::ops::FirmwareUpdate> =
+                std::fs::read_to_string(&pending_path)
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok());
+            let update = if os.is_bootloader
+                && matches!(cmd, FirmwareCmd::Update)
+                && let Some(p) = pending
+            {
+                eprintln!(
+                    "> resuming the update to {} (saved in {})",
+                    p.final_firmware.name,
+                    pending_path.display()
+                );
+                Some(p)
+            } else if os.is_bootloader || matches!(cmd, FirmwareCmd::Repair) {
                 drop(d);
                 repair_loop(&manager).await?;
                 return Ok(());
-            }
-            let update = manager.check_firmware_update(&os).await?;
+            } else {
+                manager.check_firmware_update(&os).await?
+            };
             match (cmd, update) {
                 (FirmwareCmd::Repair | FirmwareCmd::Hash { .. }, _) => unreachable!(),
                 (_, None) => println!("firmware {} is up to date", os.se_version),
                 (FirmwareCmd::Check, Some(u)) => print(&u),
                 (FirmwareCmd::Update, Some(u)) => {
-                    eprintln!(
-                        "installing OS updater {} -> {}",
-                        os.se_version, u.final_firmware.name
+                    eprintln!("updating {} -> {}", os.se_version, u.final_firmware.name);
+                    if let Some(dir) = pending_path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(
+                        &pending_path,
+                        serde_json::to_string(&u).unwrap_or_default(),
                     );
                     if !os.is_osu && !os.is_bootloader {
+                        eprintln!("> installing the OS updater: confirm on the device");
                         manager.install_osu(&d, &u, &mut progress).await?;
                     }
                     drop(d);
+                    // Reopen the device (it reboots between steps) and read its state.
+                    async fn state(
+                        wait: Duration,
+                    ) -> Result<(Device<HidTransport>, lsdk::os::OsVersion)> {
+                        let d = Device::new(HidTransport::wait_and_open(wait)?);
+                        let os = d.get_version().await?;
+                        Ok((d, os))
+                    }
                     if u.should_flash_mcu {
-                        for _ in 0..6 {
-                            eprintln!("waiting for the device (bootloader)...");
-                            let d =
-                                Device::new(HidTransport::wait_and_open(Duration::from_secs(300))?);
-                            let os = d.get_version().await?;
-                            if !os.is_bootloader {
+                        // The device must be put in bootloader mode by hand.
+                        let start = std::time::Instant::now();
+                        let mut asked = false;
+                        let mut flashed = 0;
+                        loop {
+                            if start.elapsed() > Duration::from_secs(15 * 60) {
+                                return Err(Error::App(
+                                    "the device never entered bootloader mode".into(),
+                                ));
+                            }
+                            let (d, os) = match state(Duration::from_secs(60)).await {
+                                Ok(x) => x,
+                                Err(Error::NoDevice) => continue,
+                                Err(e) => return Err(e),
+                            };
+                            if os.is_bootloader {
+                                let kind = manager.flash_mcu(&d, &u, &mut progress).await?;
+                                eprintln!("> flashed {kind:?}");
+                                flashed += 1;
+                                if flashed > 6 {
+                                    return Err(Error::App(
+                                        "still in bootloader mode after 6 flashes".into(),
+                                    ));
+                                }
+                                drop(d);
+                                std::thread::sleep(Duration::from_secs(3));
+                                continue;
+                            }
+                            if flashed > 0 {
                                 break;
                             }
-                            let kind = manager.flash_mcu(&d, &u, &mut progress).await?;
-                            eprintln!("flashed {kind:?}");
-                            std::thread::sleep(Duration::from_secs(3));
+                            if !asked {
+                                eprintln!(
+                                    "> the MCU must be updated from bootloader mode: unplug the device, then hold its left button while plugging it back in, until it shows \"Bootloader\""
+                                );
+                                asked = true;
+                            }
+                            drop(d);
+                            std::thread::sleep(Duration::from_secs(2));
                         }
                     }
-                    println!("update sent, follow the instructions on the device");
+                    if lsdk::manager::Manager::needs_final_install(&u) {
+                        // Back in the OS updater ("Update"): send the final firmware.
+                        let start = std::time::Instant::now();
+                        let d = loop {
+                            if start.elapsed() > Duration::from_secs(5 * 60) {
+                                return Err(Error::App(
+                                    "the device did not come back to the OS updater (\"Update\")"
+                                        .into(),
+                                ));
+                            }
+                            match state(Duration::from_secs(60)).await {
+                                Ok((d, os)) if os.is_osu => break d,
+                                Ok((_, os)) if os.is_bootloader => {
+                                    return Err(Error::App(
+                                        "the device is still in bootloader mode: run the update again".into(),
+                                    ));
+                                }
+                                Ok((_, os)) => {
+                                    let _ = std::fs::remove_file(&pending_path);
+                                    println!(
+                                        "the device runs {}: nothing left to do",
+                                        os.se_version
+                                    );
+                                    return Ok(());
+                                }
+                                Err(Error::NoDevice) => continue,
+                                Err(e) => return Err(e),
+                            }
+                        };
+                        eprintln!("> installing the final firmware {}", u.final_firmware.name);
+                        manager
+                            .install_final_firmware(&d, &u, &mut progress)
+                            .await?;
+                        let _ = std::fs::remove_file(&pending_path);
+                        println!(
+                            "firmware {} installed: the device restarts; follow its instructions",
+                            u.final_firmware.name
+                        );
+                    } else {
+                        let _ = std::fs::remove_file(&pending_path);
+                        println!("update sent, follow the instructions on the device");
+                    }
                 }
             }
         }
