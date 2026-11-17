@@ -372,6 +372,15 @@ impl AppImage {
         out
     }
 
+    /// Application hash on firmware before 1.4: `sha256(target_id ||
+    /// CREATE_APP params (pre-1.4 layout, inline icon) || loaded image)`.
+    pub fn app_hash_pre_1_4(&self, target_id: u32, icon: &[u8]) -> Result<[u8; 32]> {
+        let mut d = target_id.to_be_bytes().to_vec();
+        d.extend(self.create_app_params_pre_1_4(icon)?);
+        d.extend(self.without_install_params().flat_image());
+        Ok(purecrypto::hash::sha256(&d))
+    }
+
     /// Application hash, as computed by the device and reported by app
     /// listings: `sha256(target_id || CREATE_APP params || image)`.
     pub fn app_hash(&self, target_id: u32) -> Result<[u8; 32]> {
@@ -413,6 +422,10 @@ pub struct InstallOptions<'a> {
     /// Icon for firmware before 1.4 (bitmap as `icon.py hexbitmaponly`);
     /// defaults to the icon of the install parameters.
     pub icon: Option<&'a [u8]>,
+    /// Signed `COMMIT` layout on firmware before 1.4, after the entry offset:
+    /// 0 = DER signature, 1 = length-prefixed DER signature, 2 =
+    /// length-prefixed raw `r || s` signature. Ignored on 1.4+.
+    pub commit_format: u8,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -459,16 +472,11 @@ pub async fn install_app_with<T: Transport>(
     }
     let pre_1_4 = crate::scp::is_pre_1_4(chan.version.target_id);
     let stripped;
+    let icon = match opts.icon {
+        Some(i) => i.to_vec(),
+        None => image.install_params_icon().unwrap_or_default(),
+    };
     let image = if pre_1_4 {
-        if opts.signer.is_some() {
-            return Err(Error::InvalidInput(
-                "signed sideloading is not supported on firmware before 1.4".into(),
-            ));
-        }
-        let icon = match opts.icon {
-            Some(i) => i.to_vec(),
-            None => image.install_params_icon().unwrap_or_default(),
-        };
         chan.exchange(ins::CREATE_APP, &image.create_app_params_pre_1_4(&icon)?)
             .await?;
         stripped = image.without_install_params();
@@ -500,19 +508,39 @@ pub async fn install_app_with<T: Transport>(
             chan.exchange(ins::CRC, &crc).await?;
         }
     }
-    let commit = if pre_1_4 {
-        // Before 1.4, COMMIT ("boot") carries the entry point offset.
-        ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec()
-    } else {
-        match opts.signer {
-            Some(key) => {
-                let sig = key.sign_digest(&image.app_hash(chan.version.target_id)?)?;
-                let mut d = vec![sig.len() as u8];
-                d.extend(sig);
-                d
-            }
-            None => Vec::new(),
+    let commit = match (pre_1_4, opts.signer) {
+        (true, None) => {
+            // Before 1.4, COMMIT ("boot") carries the entry point offset.
+            ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec()
         }
+        (true, Some(key)) => {
+            // CA-signed install on firmware before 1.4: entry offset followed
+            // by the CA signature over the pre-1.4 app hash, in the layout
+            // selected by `commit_format`.
+            let hash = image.app_hash_pre_1_4(chan.version.target_id, &icon)?;
+            let mut d = ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec();
+            match opts.commit_format {
+                2 => {
+                    let sig = key.sign_digest_raw(&hash)?;
+                    d.push(sig.len() as u8);
+                    d.extend(sig);
+                }
+                1 => {
+                    let sig = key.sign_digest(&hash)?;
+                    d.push(sig.len() as u8);
+                    d.extend(sig);
+                }
+                _ => d.extend(key.sign_digest(&hash)?),
+            }
+            d
+        }
+        (false, Some(key)) => {
+            let sig = key.sign_digest(&image.app_hash(chan.version.target_id)?)?;
+            let mut d = vec![sig.len() as u8];
+            d.extend(sig);
+            d
+        }
+        (false, None) => Vec::new(),
     };
     chan.exchange(ins::COMMIT, &commit).await?;
     Ok(())

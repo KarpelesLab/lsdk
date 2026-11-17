@@ -12,5 +12,7 @@ cd "$(dirname "$0")"
 
 WORDS="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
 
-exec cargo run -q --release --features cli --bin lsdk -- \
+time cargo run -q --release --features cli --bin lsdk -- \
     onboard --pin 1111 --words "$WORDS" --i-understand-the-seed-travels-over-usb "$@"
+sleep 15
+cargo run -q --release --features cli --bin lsdk -- ca install

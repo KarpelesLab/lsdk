@@ -436,6 +436,11 @@ enum AppCmd {
         /// Key file to sign the app with (implies --sign).
         #[arg(long)]
         sign_key: Option<std::path::PathBuf>,
+        /// Signed COMMIT layout on firmware before 1.4: 0 = DER signature
+        /// after the entry offset, 1 = length-prefixed DER, 2 =
+        /// length-prefixed raw r||s.
+        #[arg(long, default_value_t = 0)]
+        commit_format: u8,
         /// HEX input: app name.
         #[arg(long)]
         name: Option<String>,
@@ -1680,6 +1685,7 @@ async fn run(cli: Cli) -> Result<()> {
                 dry_run,
                 sign,
                 sign_key,
+                commit_format,
                 name,
                 flags,
                 api_level,
@@ -1753,6 +1759,7 @@ async fn run(cli: Cli) -> Result<()> {
                     replace: !no_replace,
                     signer: signer.as_ref(),
                     icon: icon.as_deref(),
+                    commit_format: *commit_format,
                 };
                 lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
                     eprint!("\r> loading {sent}/{total}");

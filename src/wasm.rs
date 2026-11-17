@@ -1171,6 +1171,7 @@ impl HwDevice {
             replace,
             signer,
             icon: None,
+            commit_format: 0,
         };
         crate::loader::install_app_with(&mut chan, &img, &opts, &mut progress)
             .await
