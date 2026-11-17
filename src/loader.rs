@@ -423,10 +423,6 @@ pub struct InstallOptions<'a> {
     /// Icon for firmware before 1.4 (bitmap as `icon.py hexbitmaponly`);
     /// defaults to the icon of the install parameters.
     pub icon: Option<&'a [u8]>,
-    /// Signed `COMMIT` layout on firmware before 1.4, after the entry offset:
-    /// 0 = DER signature, 1 = length-prefixed DER signature, 2 =
-    /// length-prefixed raw `r || s` signature. Ignored on 1.4+.
-    pub commit_format: u8,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -519,10 +515,7 @@ pub async fn install_app_with<T: Transport>(
             // entry offset, then the DER CA signature over the image-only
             // app hash, length-prefixed.
             let hash = image.app_hash_pre_1_4()?;
-            let sig = match opts.commit_format {
-                2 => key.sign_digest_raw(&hash)?,
-                _ => key.sign_digest(&hash)?,
-            };
+            let sig = key.sign_digest(&hash)?;
             let mut d = ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec();
             d.push(sig.len() as u8);
             d.extend(sig);
