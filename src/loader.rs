@@ -372,13 +372,14 @@ impl AppImage {
         out
     }
 
-    /// Application hash on firmware before 1.4: `sha256(target_id ||
-    /// CREATE_APP params (pre-1.4 layout, inline icon) || loaded image)`.
-    pub fn app_hash_pre_1_4(&self, target_id: u32, icon: &[u8]) -> Result<[u8; 32]> {
-        let mut d = target_id.to_be_bytes().to_vec();
-        d.extend(self.create_app_params_pre_1_4(icon)?);
-        d.extend(self.without_install_params().flat_image());
-        Ok(purecrypto::hash::sha256(&d))
+    /// Application hash on firmware before 1.4: just `sha256(image bytes)`
+    /// — neither the target id nor the CREATE_APP parameters are covered
+    /// (per ledgerblue hexLoader.load: createappParams is None there, the
+    /// target id is only hashed from 1.4 on).
+    pub fn app_hash_pre_1_4(&self) -> Result<[u8; 32]> {
+        Ok(purecrypto::hash::sha256(
+            &self.without_install_params().flat_image(),
+        ))
     }
 
     /// Application hash, as computed by the device and reported by app
@@ -514,24 +515,17 @@ pub async fn install_app_with<T: Transport>(
             ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec()
         }
         (true, Some(key)) => {
-            // CA-signed install on firmware before 1.4: entry offset followed
-            // by the CA signature over the pre-1.4 app hash, in the layout
-            // selected by `commit_format`.
-            let hash = image.app_hash_pre_1_4(chan.version.target_id, &icon)?;
+            // CA-signed install on firmware before 1.4 (ledgerblue `boot`):
+            // entry offset, then the DER CA signature over the image-only
+            // app hash, length-prefixed.
+            let hash = image.app_hash_pre_1_4()?;
+            let sig = match opts.commit_format {
+                2 => key.sign_digest_raw(&hash)?,
+                _ => key.sign_digest(&hash)?,
+            };
             let mut d = ((image.entry.wrapping_sub(min)) | 1).to_be_bytes().to_vec();
-            match opts.commit_format {
-                2 => {
-                    let sig = key.sign_digest_raw(&hash)?;
-                    d.push(sig.len() as u8);
-                    d.extend(sig);
-                }
-                1 => {
-                    let sig = key.sign_digest(&hash)?;
-                    d.push(sig.len() as u8);
-                    d.extend(sig);
-                }
-                _ => d.extend(key.sign_digest(&hash)?),
-            }
+            d.push(sig.len() as u8);
+            d.extend(sig);
             d
         }
         (false, Some(key)) => {
