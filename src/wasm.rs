@@ -1189,6 +1189,7 @@ impl HwDevice {
             icon: None,
             reserve: 0,
             reserve_pad: 0,
+            reserve_pad_pattern: None,
         };
         crate::loader::install_app_with(&mut chan, &img, &opts, &mut progress)
             .await

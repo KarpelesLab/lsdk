@@ -432,9 +432,11 @@ pub struct InstallOptions<'a> {
     /// leaves there). Without `reserve_pad`, a bare `SET_LOAD_OFFSET` to its
     /// last byte is sent after the image.
     pub reserve: u32,
-    /// Zero bytes actually loaded at the end of the reserved area
+    /// Bytes actually loaded at the end of the reserved area
     /// (at most `reserve`).
     pub reserve_pad: u32,
+    /// Pattern repeated over the reserve pad (zeros when unset).
+    pub reserve_pad_pattern: Option<&'a [u8]>,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -506,10 +508,20 @@ pub async fn install_app_with<T: Transport>(
                 "reserve pad larger than reserve".into(),
             ));
         }
-        // Experimental: zeros at the end of the reserved area.
+        // Experimental: a pattern (zeros by default) at the end of the
+        // reserved area.
+        let pattern = opts.reserve_pad_pattern.unwrap_or(&[0]);
+        if pattern.is_empty() {
+            return Err(Error::InvalidInput("empty reserve pad pattern".into()));
+        }
         areas.push(Area {
             address: min + image.image_size() + opts.reserve - opts.reserve_pad,
-            data: vec![0; opts.reserve_pad as usize],
+            data: pattern
+                .iter()
+                .copied()
+                .cycle()
+                .take(opts.reserve_pad as usize)
+                .collect(),
         });
     }
     let total: usize = areas.iter().map(|a| a.data.len()).sum();

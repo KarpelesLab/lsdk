@@ -464,10 +464,14 @@ enum AppCmd {
         /// without loading them (experimental).
         #[arg(long, default_value_t = 0)]
         reserve: u32,
-        /// Firmware before 1.4: zero bytes actually loaded at the end of the
-        /// reserved area (at most --reserve).
+        /// Firmware before 1.4: bytes actually loaded at the end of the
+        /// reserved area (at most --reserve), zeros unless
+        /// --reserve-pad-pattern is given.
         #[arg(long, default_value_t = 0)]
         reserve_pad: u32,
+        /// Hex pattern repeated over the reserve pad (e.g. ff, deadbeef).
+        #[arg(long)]
+        reserve_pad_pattern: Option<String>,
     },
     /// Delete an app by name (or --hash).
     Delete {
@@ -1697,7 +1701,13 @@ async fn run(cli: Cli) -> Result<()> {
                 icon,
                 reserve,
                 reserve_pad,
+                reserve_pad_pattern,
             } => {
+                let reserve_pad_pattern = reserve_pad_pattern
+                    .as_deref()
+                    .map(hex::decode)
+                    .transpose()
+                    .map_err(|e| Error::InvalidInput(format!("--reserve-pad-pattern: {e}")))?;
                 let icon = icon
                     .as_deref()
                     .map(hex::decode)
@@ -1775,6 +1785,7 @@ async fn run(cli: Cli) -> Result<()> {
                     icon: icon.as_deref(),
                     reserve: *reserve,
                     reserve_pad: *reserve_pad,
+                    reserve_pad_pattern: reserve_pad_pattern.as_deref(),
                 };
                 lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
                     eprint!("\r> loading {sent}/{total}");
