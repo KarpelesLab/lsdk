@@ -172,6 +172,9 @@ export async function run(label, fn, { retryOnDisconnect = true } = {}) {
 // Callback for HSM events (genuine check, install, firmware).
 export function hsmEvent(ev) {
   switch (ev.type) {
+    case 'installing':
+      log('info', `installing ${ev.name}`)
+      break
     case 'permissionRequested':
       state.prompt = 'Allow the secure connection on your device'
       break

@@ -255,6 +255,9 @@ impl Manager {
         app: &Application,
         on_event: &mut dyn FnMut(HsmEvent),
     ) -> Result<()> {
+        on_event(HsmEvent::Installing {
+            name: app.firmware.clone(),
+        });
         let target = os.target_id.to_string();
         let url = hsm::build_url(
             &self.hsm_url,
@@ -440,6 +443,9 @@ impl Manager {
                 "device is in bootloader mode, flash the MCU instead".into(),
             ));
         }
+        on_event(HsmEvent::Installing {
+            name: update.osu.firmware.clone(),
+        });
         let target = os.target_id.to_string();
         let url = hsm::build_url(
             &self.hsm_url,
@@ -487,6 +493,9 @@ impl Manager {
                 ));
             }
         };
+        on_event(HsmEvent::Installing {
+            name: firmware.clone(),
+        });
         let target = os.target_id.to_string();
         let url = hsm::build_url(
             &self.hsm_url,
@@ -638,6 +647,13 @@ impl Manager {
         kind: FlashKind,
         on_event: &mut dyn FnMut(HsmEvent),
     ) -> Result<FlashKind> {
+        let what = match kind {
+            FlashKind::Mcu => "mcu",
+            FlashKind::Bootloader => "bootloader",
+        };
+        on_event(HsmEvent::Installing {
+            name: format!("{what} {version}"),
+        });
         let target = os.target_id.to_string();
         let url = hsm::build_url(
             &self.hsm_url,

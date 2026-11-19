@@ -29,6 +29,9 @@ pub const DEFAULT_BASE_URL: &str = "wss://scriptrunner.api.live.ledger.com/updat
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type", rename_all = "camelCase"))]
 pub enum HsmEvent {
+    /// What the session installs: the HSM script's internal name (e.g.
+    /// `nanos/1.4.2/fw_1.3.1/upgrade_osu_1.4.2`, `mcu 1.7`).
+    Installing { name: String },
     /// Websocket connected.
     Opened,
     /// The device is asking the user to allow the secure channel ("allow manager").

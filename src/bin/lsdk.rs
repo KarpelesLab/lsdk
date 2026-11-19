@@ -669,6 +669,7 @@ fn print<T: Serialize>(v: &T) {
 
 fn progress(ev: HsmEvent) {
     match ev {
+        HsmEvent::Installing { name } => eprintln!("> installing {name}"),
         HsmEvent::PermissionRequested => eprintln!("> allow the secure connection on the device"),
         HsmEvent::PermissionGranted => eprintln!("> secure connection allowed"),
         HsmEvent::Progress {
