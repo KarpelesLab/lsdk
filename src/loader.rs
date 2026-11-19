@@ -428,10 +428,13 @@ pub struct InstallOptions<'a> {
     /// defaults to the icon of the install parameters.
     pub icon: Option<&'a [u8]>,
     /// Firmware before 1.4: extra bytes declared in `CREATE_APP` after the
-    /// image, not loaded; a bare `SET_LOAD_OFFSET` to its last byte is sent
-    /// after the image (experimental: contents are whatever the device
-    /// leaves there).
+    /// image, not loaded (experimental: contents are whatever the device
+    /// leaves there). Without `reserve_pad`, a bare `SET_LOAD_OFFSET` to its
+    /// last byte is sent after the image.
     pub reserve: u32,
+    /// Zero bytes actually loaded at the end of the reserved area
+    /// (at most `reserve`).
+    pub reserve_pad: u32,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -495,10 +498,23 @@ pub async fn install_app_with<T: Transport>(
             .await?;
         image
     };
-    let total: usize = image.areas.iter().map(|a| a.data.len()).sum();
-    let mut sent = 0;
     let min = image.min_address();
-    for area in &image.areas {
+    let mut areas = image.areas.clone();
+    if pre_1_4 && opts.reserve_pad > 0 {
+        if opts.reserve_pad > opts.reserve {
+            return Err(Error::InvalidInput(
+                "reserve pad larger than reserve".into(),
+            ));
+        }
+        // Experimental: zeros at the end of the reserved area.
+        areas.push(Area {
+            address: min + image.image_size() + opts.reserve - opts.reserve_pad,
+            data: vec![0; opts.reserve_pad as usize],
+        });
+    }
+    let total: usize = areas.iter().map(|a| a.data.len()).sum();
+    let mut sent = 0;
+    for area in &areas {
         for (w, window) in area.data.chunks(WINDOW).enumerate() {
             let base = area.address - min + (w * WINDOW) as u32;
             chan.exchange(ins::SET_LOAD_OFFSET, &base.to_be_bytes())
@@ -517,7 +533,7 @@ pub async fn install_app_with<T: Transport>(
             chan.exchange(ins::CRC, &crc).await?;
         }
     }
-    if pre_1_4 && opts.reserve > 0 {
+    if pre_1_4 && opts.reserve > 0 && opts.reserve_pad == 0 {
         // Experimental: point the load offset at the last byte of the
         // reserved area, without loading anything there.
         let last = image.image_size() + opts.reserve - 1;

@@ -464,6 +464,10 @@ enum AppCmd {
         /// without loading them (experimental).
         #[arg(long, default_value_t = 0)]
         reserve: u32,
+        /// Firmware before 1.4: zero bytes actually loaded at the end of the
+        /// reserved area (at most --reserve).
+        #[arg(long, default_value_t = 0)]
+        reserve_pad: u32,
     },
     /// Delete an app by name (or --hash).
     Delete {
@@ -1692,6 +1696,7 @@ async fn run(cli: Cli) -> Result<()> {
                 legacy_layout,
                 icon,
                 reserve,
+                reserve_pad,
             } => {
                 let icon = icon
                     .as_deref()
@@ -1769,6 +1774,7 @@ async fn run(cli: Cli) -> Result<()> {
                     signer: signer.as_ref(),
                     icon: icon.as_deref(),
                     reserve: *reserve,
+                    reserve_pad: *reserve_pad,
                 };
                 lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
                     eprint!("\r> loading {sent}/{total}");
