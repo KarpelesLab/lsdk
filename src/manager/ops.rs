@@ -536,10 +536,7 @@ impl Manager {
             return Ok(None);
         }
         let (Some(se_target), false) = (os.se_target_id, os.se_version.is_empty()) else {
-            return Err(Error::App(
-                "the bootloader does not report the installed firmware; cannot pick an MCU version"
-                    .into(),
-            ));
+            return self.repair_legacy(device, os, on_event).await.map(Some);
         };
         let provider = os.provider_id();
         let dv = self.api.get_device_version(se_target, provider).await?;
@@ -583,18 +580,72 @@ impl Manager {
         } else {
             bootloader_version
         };
+        let kind = if is_mcu {
+            FlashKind::Mcu
+        } else {
+            FlashKind::Bootloader
+        };
+        self.install_mcu(device, os, &version, kind, on_event).await
+    }
+
+    /// Old bootloaders (Nano S, before the SE firmware was reported in
+    /// bootloader mode) only give their own version: the next step is fixed
+    /// per bootloader version, as in the vendor's repair flow.
+    async fn repair_legacy<T: Transport>(
+        &self,
+        device: &Device<T>,
+        os: OsVersion,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<FlashKind> {
+        let full = os.maj_min();
+        let mm: String = full.split('.').take(2).collect::<Vec<_>>().join(".");
+        let (version, kind) = match mm.as_str() {
+            // A bootloader reporting no version at all: install bootloader
+            // 0.6 first, the next pass then flashes the MCU.
+            "0.0" => ("0.6".to_string(), FlashKind::Bootloader),
+            "0.6" => ("1.5".to_string(), FlashKind::Mcu),
+            "0.7" => ("1.6".to_string(), FlashKind::Mcu),
+            "0.9" => ("1.7".to_string(), FlashKind::Mcu),
+            _ => {
+                let provider = os.provider_id();
+                let mcus = self.api.get_mcu_versions().await?;
+                let candidates: Vec<McuVersion> = mcus
+                    .into_iter()
+                    .filter(|m| {
+                        m.providers.contains(&provider)
+                            && (m.from_bootloader_version == mm
+                                || m.from_bootloader_version == full)
+                    })
+                    .collect();
+                let mcu = api::find_best_mcu(&candidates).ok_or_else(|| {
+                    Error::NotFound(format!(
+                        "no MCU version known for bootloader {full} (the bootloader does not report the installed firmware)"
+                    ))
+                })?;
+                (mcu.name.clone(), FlashKind::Mcu)
+            }
+        };
+        self.install_mcu(device, &os, &version, kind, on_event).await
+    }
+
+    /// Flash an MCU or bootloader `version` through the vendor HSM.
+    async fn install_mcu<T: Transport>(
+        &self,
+        device: &Device<T>,
+        os: &OsVersion,
+        version: &str,
+        kind: FlashKind,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<FlashKind> {
         let target = os.target_id.to_string();
         let url = hsm::build_url(
             &self.hsm_url,
             "/mcu",
-            &[("targetId", &target), ("version", &version)],
+            &[("targetId", &target), ("version", version)],
         );
         match hsm::run(device.transport(), &url, on_event).await {
-            Ok(_) | Err(Error::Disconnected) => Ok(if is_mcu {
-                FlashKind::Mcu
-            } else {
-                FlashKind::Bootloader
-            }),
+            // The device reboots at the end, losing the link is expected.
+            Ok(_) | Err(Error::Disconnected) => Ok(kind),
             Err(e) => Err(e),
         }
     }
