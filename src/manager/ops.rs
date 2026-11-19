@@ -625,7 +625,8 @@ impl Manager {
                 (mcu.name.clone(), FlashKind::Mcu)
             }
         };
-        self.install_mcu(device, &os, &version, kind, on_event).await
+        self.install_mcu(device, &os, &version, kind, on_event)
+            .await
     }
 
     /// Flash an MCU or bootloader `version` through the vendor HSM.

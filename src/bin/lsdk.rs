@@ -460,6 +460,10 @@ enum AppCmd {
         /// install parameters, if any.
         #[arg(long)]
         icon: Option<String>,
+        /// Firmware before 1.4: extra bytes declared after the image
+        /// without loading them (experimental).
+        #[arg(long, default_value_t = 0)]
+        reserve: u32,
     },
     /// Delete an app by name (or --hash).
     Delete {
@@ -1687,6 +1691,7 @@ async fn run(cli: Cli) -> Result<()> {
                 install_params_size,
                 legacy_layout,
                 icon,
+                reserve,
             } => {
                 let icon = icon
                     .as_deref()
@@ -1732,6 +1737,16 @@ async fn run(cli: Cli) -> Result<()> {
                 );
                 if *dry_run {
                     println!("create_app {}", hex::encode(img.create_app_params()?));
+                    println!(
+                        "create_app (pre-1.4) {}",
+                        hex::encode(
+                            img.create_app_params_pre_1_4(
+                                icon.as_deref()
+                                    .unwrap_or(&img.install_params_icon().unwrap_or_default()),
+                                *reserve
+                            )?
+                        )
+                    );
                     if let Some(t) = img.target_id {
                         println!("app hash {}", hex::encode(img.app_hash(t)?));
                     }
@@ -1753,6 +1768,7 @@ async fn run(cli: Cli) -> Result<()> {
                     replace: !no_replace,
                     signer: signer.as_ref(),
                     icon: icon.as_deref(),
+                    reserve: *reserve,
                 };
                 lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
                     eprint!("\r> loading {sent}/{total}");

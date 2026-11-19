@@ -333,11 +333,15 @@ impl AppImage {
     /// whole length (code and data), flags, name, inline icon and a
     /// derivation restriction (`ff`: any curve, no path). Install
     /// parameters are not part of this layout and are left out.
-    pub fn create_app_params_pre_1_4(&self, icon: &[u8]) -> Result<Vec<u8>> {
+    /// `reserve` extra bytes are declared after the image without being
+    /// loaded.
+    pub fn create_app_params_pre_1_4(&self, icon: &[u8], reserve: u32) -> Result<Vec<u8>> {
         if icon.len() > 255 || self.name.len() > 255 {
             return Err(Error::InvalidInput("app name or icon too long".into()));
         }
-        let len = self.image_size() - self.install_params_size;
+        let len = (self.image_size() - self.install_params_size)
+            .checked_add(reserve)
+            .ok_or_else(|| Error::InvalidInput("reserve too large".into()))?;
         let mut d = len.to_be_bytes().to_vec();
         d.extend_from_slice(&self.flags.to_be_bytes());
         d.push(self.name.len() as u8);
@@ -423,6 +427,10 @@ pub struct InstallOptions<'a> {
     /// Icon for firmware before 1.4 (bitmap as `icon.py hexbitmaponly`);
     /// defaults to the icon of the install parameters.
     pub icon: Option<&'a [u8]>,
+    /// Firmware before 1.4: extra bytes declared in `CREATE_APP` after the
+    /// image, not loaded (experimental: contents are whatever the device
+    /// leaves there).
+    pub reserve: u32,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -474,8 +482,11 @@ pub async fn install_app_with<T: Transport>(
         None => image.install_params_icon().unwrap_or_default(),
     };
     let image = if pre_1_4 {
-        chan.exchange(ins::CREATE_APP, &image.create_app_params_pre_1_4(&icon)?)
-            .await?;
+        chan.exchange(
+            ins::CREATE_APP,
+            &image.create_app_params_pre_1_4(&icon, opts.reserve)?,
+        )
+        .await?;
         stripped = image.without_install_params();
         &stripped
     } else {
