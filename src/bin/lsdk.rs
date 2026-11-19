@@ -850,6 +850,19 @@ fn open(cli: &Cli) -> Result<Device<Link>> {
     Ok(Device::new(Link::Hid(t)))
 }
 
+/// Reopen the device the way `open` does (USB, or `--tcp`), retrying until
+/// `wait` elapses: it reboots between firmware update steps.
+fn reopen(cli: &Cli, wait: Duration) -> Result<Device<Link>> {
+    let start = std::time::Instant::now();
+    loop {
+        match open(cli) {
+            Ok(d) => return Ok(d),
+            Err(e) if start.elapsed() > wait => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
 /// Unlock a HW.1 with --pin, refusing to burn the last attempt blindly.
 async fn hw1_unlock<T: lsdk::Transport>(w: &btchip::BtchipWallet<'_, T>, pin: &str) -> Result<()> {
     match w.pin_attempts().await? {
@@ -2035,7 +2048,7 @@ async fn run(cli: Cli) -> Result<()> {
                 Some(p)
             } else if os.is_bootloader || matches!(cmd, FirmwareCmd::Repair) {
                 drop(d);
-                repair_loop(&manager).await?;
+                repair_loop(&cli, &manager).await?;
                 return Ok(());
             } else {
                 let osu = match cmd {
@@ -2098,11 +2111,16 @@ async fn run(cli: Cli) -> Result<()> {
                     // Reopen the device (it reboots between steps) and read its state.
                     // Each new state seen is logged, so waits are visible.
                     async fn state(
+                        cli: &Cli,
                         wait: Duration,
-                    ) -> Result<(Device<HidTransport>, lsdk::os::OsVersion)> {
+                    ) -> Result<(Device<Link>, lsdk::os::OsVersion)> {
                         static LAST: std::sync::Mutex<String> =
                             std::sync::Mutex::new(String::new());
-                        let d = Device::new(HidTransport::wait_and_open(wait)?);
+                        // A TCP connect failure counts as "not there yet".
+                        let d = reopen(cli, wait).map_err(|e| match e {
+                            Error::Transport(_) => Error::NoDevice,
+                            e => e,
+                        })?;
                         let os = d.get_version().await?;
                         let seen = format!(
                             "{}{} (MCU {})",
@@ -2140,7 +2158,7 @@ async fn run(cli: Cli) -> Result<()> {
                                     "the device never entered bootloader mode".into(),
                                 ));
                             }
-                            let (d, os) = match state(Duration::from_secs(60)).await {
+                            let (d, os) = match state(&cli, Duration::from_secs(60)).await {
                                 Ok(x) => x,
                                 Err(Error::NoDevice) => continue,
                                 Err(e) => return Err(e),
@@ -2181,7 +2199,7 @@ async fn run(cli: Cli) -> Result<()> {
                                         .into(),
                                 ));
                             }
-                            match state(Duration::from_secs(60)).await {
+                            match state(&cli, Duration::from_secs(60)).await {
                                 Ok((d, os)) if os.is_osu => break d,
                                 Ok((_, os)) if os.is_bootloader => {
                                     return Err(Error::App(
@@ -2517,9 +2535,9 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 /// Flash MCU / bootloader while the device stays in bootloader mode.
-async fn repair_loop(manager: &Manager) -> Result<()> {
+async fn repair_loop(cli: &Cli, manager: &Manager) -> Result<()> {
     for _ in 0..6 {
-        let d = Device::new(HidTransport::wait_and_open(Duration::from_secs(300))?);
+        let d = reopen(cli, Duration::from_secs(300))?;
         let os = d.get_version().await?;
         if !os.is_bootloader {
             println!(
