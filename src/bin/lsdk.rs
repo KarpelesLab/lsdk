@@ -515,9 +515,17 @@ enum ScreensaverCmd {
 #[derive(Subcommand)]
 enum FirmwareCmd {
     /// Check whether an update is available.
-    Check,
+    Check {
+        /// OS updater to use instead of the latest (e.g. 1.4.2-osu-hidden).
+        #[arg(long)]
+        osu: Option<String>,
+    },
     /// Install the latest firmware (OSU, then MCU if needed).
-    Update,
+    Update {
+        /// OS updater to use instead of the latest (e.g. 1.4.2-osu-hidden).
+        #[arg(long)]
+        osu: Option<String>,
+    },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair,
     /// Firmware integrity hash (vendor HSM sessions only: refused with a custom CA).
@@ -1906,7 +1914,7 @@ async fn run(cli: Cli) -> Result<()> {
                     .ok()
                     .and_then(|t| serde_json::from_str(&t).ok());
             let update = if os.is_bootloader
-                && matches!(cmd, FirmwareCmd::Update)
+                && matches!(cmd, FirmwareCmd::Update { .. })
                 && let Some(p) = pending
             {
                 eprintln!(
@@ -1920,14 +1928,27 @@ async fn run(cli: Cli) -> Result<()> {
                 repair_loop(&manager).await?;
                 return Ok(());
             } else {
-                manager.check_firmware_update(&os).await?
+                let osu = match cmd {
+                    FirmwareCmd::Check { osu } | FirmwareCmd::Update { osu } => osu.as_deref(),
+                    _ => None,
+                };
+                if osu.is_some() && os.is_osu {
+                    eprintln!(
+                        "> the device already runs the OS updater {}: --osu ignored",
+                        os.raw_version
+                    );
+                }
+                manager.firmware_update_via(&os, osu).await?
             };
             match (cmd, update) {
                 (FirmwareCmd::Repair | FirmwareCmd::Hash { .. }, _) => unreachable!(),
                 (_, None) => println!("firmware {} is up to date", os.se_version),
-                (FirmwareCmd::Check, Some(u)) => print(&u),
-                (FirmwareCmd::Update, Some(u)) => {
-                    eprintln!("updating {} -> {}", os.se_version, u.final_firmware.name);
+                (FirmwareCmd::Check { .. }, Some(u)) => print(&u),
+                (FirmwareCmd::Update { .. }, Some(u)) => {
+                    eprintln!(
+                        "updating {} -> {} (OSU {}, id {})",
+                        os.se_version, u.final_firmware.name, u.osu.name, u.osu.id
+                    );
                     if let Some(dir) = pending_path.parent() {
                         let _ = std::fs::create_dir_all(dir);
                     }

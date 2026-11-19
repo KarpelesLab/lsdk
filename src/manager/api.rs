@@ -60,6 +60,9 @@ pub struct OsuFirmware {
     #[serde(default)]
     pub hash: Option<String>,
     pub next_se_firmware_final_version: u32,
+    /// Final firmware ids this OSU updates from.
+    #[serde(default)]
+    pub previous_se_firmware_final_versions: Vec<u32>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]

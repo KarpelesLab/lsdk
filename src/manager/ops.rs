@@ -384,6 +384,18 @@ impl Manager {
 
     /// Check whether a firmware update is available.
     pub async fn check_firmware_update(&self, os: &OsVersion) -> Result<Option<FirmwareUpdate>> {
+        self.firmware_update_via(os, None).await
+    }
+
+    /// Like [`Self::check_firmware_update`], with the OS updater chosen by
+    /// name (e.g. `1.4.2-osu-hidden`) instead of the latest one. The OSU must
+    /// update from the device's current final firmware. Ignored when the
+    /// device already runs an OS updater.
+    pub async fn firmware_update_via(
+        &self,
+        os: &OsVersion,
+        osu_name: Option<&str>,
+    ) -> Result<Option<FirmwareUpdate>> {
         if os.is_bootloader {
             return Err(Error::App(
                 "device is in bootloader mode: finish the update with repair_mcu (flash the MCU) first".into(),
@@ -402,9 +414,29 @@ impl Manager {
                 .api
                 .get_firmware_version(dv.id, &os.version(), provider)
                 .await?;
-            self.api
-                .get_latest_firmware(current.id, dv.id, provider)
-                .await?
+            match osu_name {
+                Some(name) => {
+                    let osu = self.api.get_osu_version(dv.id, name, provider).await?;
+                    if !osu
+                        .previous_se_firmware_final_versions
+                        .contains(&current.id)
+                    {
+                        return Err(Error::InvalidInput(format!(
+                            "{name} (id {}) does not update from {} (final firmware id {}; it updates from ids {:?})",
+                            osu.id,
+                            current.name,
+                            current.id,
+                            osu.previous_se_firmware_final_versions
+                        )));
+                    }
+                    Some(osu)
+                }
+                None => {
+                    self.api
+                        .get_latest_firmware(current.id, dv.id, provider)
+                        .await?
+                }
+            }
         };
         let Some(osu) = osu else { return Ok(None) };
         let final_firmware = self
