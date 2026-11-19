@@ -428,7 +428,8 @@ pub struct InstallOptions<'a> {
     /// defaults to the icon of the install parameters.
     pub icon: Option<&'a [u8]>,
     /// Firmware before 1.4: extra bytes declared in `CREATE_APP` after the
-    /// image, not loaded (experimental: contents are whatever the device
+    /// image, not loaded; a bare `SET_LOAD_OFFSET` to its last byte is sent
+    /// after the image (experimental: contents are whatever the device
     /// leaves there).
     pub reserve: u32,
 }
@@ -515,6 +516,13 @@ pub async fn install_app_with<T: Transport>(
             crc.extend_from_slice(&crc16(window).to_be_bytes());
             chan.exchange(ins::CRC, &crc).await?;
         }
+    }
+    if pre_1_4 && opts.reserve > 0 {
+        // Experimental: point the load offset at the last byte of the
+        // reserved area, without loading anything there.
+        let last = image.image_size() + opts.reserve - 1;
+        chan.exchange(ins::SET_LOAD_OFFSET, &last.to_be_bytes())
+            .await?;
     }
     let commit = match (pre_1_4, opts.signer) {
         (true, None) => {
