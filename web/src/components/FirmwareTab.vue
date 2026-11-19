@@ -1,12 +1,13 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { state, run, hsmEvent, log, errorText, waitDevice, flashWhileBootloader, finishBootloaderUpdate } from '../lib/store.js'
+import { state, run, hsmEvent, log, errorText, waitDevice, flashWhileBootloader, finishBootloaderUpdate, finishFirmwareUpdate, needsFinalInstall, ENTER_BOOTLOADER } from '../lib/store.js'
 import { renderMarkdown } from '../lib/markdown.js'
 
 const error = ref(null)
 const update = ref(undefined) // undefined: not checked, null: up to date
 const phase = computed({ get: () => state.fwPhase, set: (v) => { state.fwPhase = v } })
 const v = computed(() => state.info?.version)
+const needsFinal = computed(() => needsFinalInstall(update.value))
 const notesHtml = computed(() => renderMarkdown(update.value?.osu?.notes))
 
 async function guard(fn) {
@@ -30,10 +31,15 @@ const start = () => guard(async () => {
     }, { retryOnDisconnect: false }).catch((e) => {
       if (e?.kind !== 'Disconnected') throw e
     })
-    log('ok', 'OS updater installed, the device installs the firmware and restarts')
+    log('ok', 'OS updater installed, the device restarts')
+    await waitDevice('reboot')
+  } else if (v.value?.isOsu) {
+    log('info', `the device runs the OS updater: continuing the update to ${u.final.name}`)
   }
-  await waitDevice('reboot')
-  await flashWhileBootloader()
+  // Devices that enter bootloader mode by themselves; otherwise
+  // finishFirmwareUpdate asks for it (Nano S).
+  if (!u.shouldFlashMcu) await flashWhileBootloader(u)
+  await finishFirmwareUpdate(u)
   phase.value = 'done'
   update.value = undefined
   log('ok', `firmware is now ${state.info?.version?.seVersion ?? state.info?.app?.version ?? 'updated'}`)
@@ -68,6 +74,10 @@ const finish = () => guard(finishBootloaderUpdate)
       </div>
     </div>
 
+    <div v-if="v?.isOsu && !phase && update === undefined" class="panel">
+      <p class="muted small-text" style="margin:0">The device runs the OS updater: a firmware update is in progress. <b>Check for updates</b>, then <b>Update firmware</b> to finish it.</p>
+    </div>
+
     <div v-if="update === null" class="panel"><span class="badge ok">✓ up to date</span></div>
 
     <div v-if="update" class="panel">
@@ -78,10 +88,16 @@ const finish = () => guard(finishBootloaderUpdate)
         <button class="primary" :disabled="!!state.busy || !!phase" @click="start">Update firmware</button>
       </div>
       <ol class="steps small-text">
-        <li :class="{ on: phase === 'osu' }">Install the OS updater (confirm on the device)</li>
-        <li :class="{ on: phase === 'reboot' }">The device installs the update and restarts; this page reconnects automatically</li>
-        <li v-if="update.shouldFlashMcu" :class="{ on: phase === 'mcu' }">Flash the MCU from bootloader mode</li>
+        <li v-if="!v?.isOsu" :class="{ on: phase === 'osu' }">Install the OS updater (confirm on the device)</li>
+        <li :class="{ on: phase === 'reboot' }">The device restarts; this page reconnects automatically</li>
+        <li v-if="update.shouldFlashMcu" :class="{ on: phase === 'enterBootloader' || phase === 'mcu' }">Flash the MCU from bootloader mode</li>
+        <li v-if="needsFinal" :class="{ on: phase === 'final' }">Install firmware {{ update.final.name }} from the OS updater (the device shows "Update")</li>
       </ol>
+      <p v-if="phase === 'enterBootloader'" class="note">
+        <b>{{ ENTER_BOOTLOADER }}.</b> It shows up as a new USB device the browser has not authorized
+        yet: click <b>Select device</b> in the header and pick it (it may be listed as a "Bootloader").
+        If the device enters bootloader mode by itself, there is nothing to do.
+      </p>
       <p v-if="phase === 'reboot'" class="note">
         Waiting for the device… When it restarts in bootloader mode it shows up as a new USB device the
         browser has not authorized yet: click <b>Select device</b> in the header and pick it (it may be

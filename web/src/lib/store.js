@@ -232,14 +232,16 @@ export async function runInApp(app, label, fn, opts) {
   return run(label, fn, opts)
 }
 
-// Wait for the device to come back (reboot / re-enumeration).
-export async function waitDevice(phase = 'reboot', timeout = 600000) {
+// Wait for the device to come back (reboot / re-enumeration). `goneTimeout`:
+// how long to wait for the current device to go away (longer when the user
+// has to replug it by hand).
+export async function waitDevice(phase = 'reboot', timeout = 600000, { goneTimeout = 30000 } = {}) {
   state.fwPhase = phase
-  log('info', 'waiting for the device to restart…')
+  if (phase === 'reboot') log('info', 'waiting for the device to restart…')
   const old = state.device
   // First see the current device go away: it can take a moment after the
   // last APDU, and reconnecting before that would pick up the dying handle.
-  const gone = Date.now() + 30000
+  const gone = Date.now() + goneTimeout
   while (old && !old.disconnected && Date.now() < gone) await sleep(250)
   if (old && !old.disconnected) {
     log('warn', 'the device did not restart, checking its state')
@@ -260,28 +262,89 @@ export async function waitDevice(phase = 'reboot', timeout = 600000) {
   }
 }
 
+// Flash the MCU (or bootloader) once, then wait for the restart. With the
+// update descriptor, the MCU its final firmware needs; without (recovery),
+// the one the installed firmware needs.
+async function flashMcuOnce(u) {
+  state.fwPhase = 'mcu'
+  const kind = await run('flash MCU', (d) => {
+    state.prompt = 'Allow the secure connection on the device if asked'
+    return u ? d.flashMcu(u, hsmEvent) : d.repairMcu(hsmEvent)
+  }, { retryOnDisconnect: false }).catch((e) => {
+    if (e?.kind !== 'Disconnected') throw e
+    return 'mcu'
+  })
+  log('ok', `${kind} flashed`)
+  await waitDevice('reboot')
+}
+
 // While the device sits in bootloader mode, flash what its installed firmware
 // needs (MCU or bootloader), waiting for each restart.
-export async function flashWhileBootloader() {
-  for (let i = 0; i < 6 && state.info?.version?.isBootloader; i++) {
-    state.fwPhase = 'mcu'
-    const kind = await run('flash MCU', (d) => {
-      state.prompt = 'Allow the secure connection on the device if asked'
-      return d.repairMcu(hsmEvent)
-    }, { retryOnDisconnect: false }).catch((e) => {
-      if (e?.kind !== 'Disconnected') throw e
-      return 'mcu'
-    })
-    log('ok', `${kind} flashed`)
-    await waitDevice('reboot')
-  }
+export async function flashWhileBootloader(u = null) {
+  for (let i = 0; i < 6 && state.info?.version?.isBootloader; i++) await flashMcuOnce(u)
   if (state.info?.version?.isBootloader) throw new Error('device is still in bootloader mode after several flashes')
+}
+
+// Nano S: the final firmware has its own image, sent from the OS updater.
+export const needsFinalInstall = (u) => !!u?.final?.firmware
+
+export const ENTER_BOOTLOADER =
+  'Unplug the device, then hold its left button while plugging it back in, until it shows "Bootloader"'
+
+// Steps after the OS updater (device restarted, or found running it):
+// flash the MCU from bootloader mode if needed (the Nano S must be put in
+// bootloader mode by hand), then install the final firmware if it has its
+// own image (Nano S, from the OS updater).
+export async function finishFirmwareUpdate(u) {
+  if (u.shouldFlashMcu) {
+    const deadline = Date.now() + 15 * 60000
+    let flashed = 0
+    for (;;) {
+      if (state.info?.version?.isBootloader) {
+        if (++flashed > 6) throw new Error('still in bootloader mode after 6 flashes')
+        await flashMcuOnce(u)
+        continue
+      }
+      if (flashed > 0) break
+      const left = deadline - Date.now()
+      if (left <= 0) throw new Error('the device never entered bootloader mode')
+      log('info', `the MCU must be updated from bootloader mode: ${ENTER_BOOTLOADER}`)
+      await waitDevice('enterBootloader', left, { goneTimeout: left })
+    }
+  }
+  if (!needsFinalInstall(u)) return
+  const v = state.info?.version
+  if (v?.isBootloader) throw new Error('the device is still in bootloader mode: run the update again')
+  if (!v?.isOsu) return // already running the final firmware
+  state.fwPhase = 'final'
+  await run(`install firmware ${u.final.name}`, (d) => {
+    state.prompt = 'Allow the secure connection on the device if asked'
+    return d.installFinalFirmware(u, hsmEvent)
+  }, { retryOnDisconnect: false }).catch((e) => {
+    if (e?.kind !== 'Disconnected') throw e
+  })
+  log('ok', `firmware ${u.final.name} installed, the device restarts`)
+  try {
+    await waitDevice('reboot')
+  } catch (e) {
+    // It may wait on a setup or PIN screen and not answer yet.
+    log('warn', `${errorText(e)}: follow the instructions on the device`)
+  }
 }
 
 // Finish an interrupted update (device found in bootloader mode).
 export async function finishBootloaderUpdate() {
   try {
     await flashWhileBootloader()
+    // Nano S: the repair brings it back to the OS updater ("Update"); the
+    // update goes on from there.
+    if (state.info?.version?.isOsu) {
+      const u = await run('check firmware', (d) => d.checkFirmware())
+      if (u) {
+        log('info', `continuing the update to ${u.final.name}`)
+        await finishFirmwareUpdate(u)
+      }
+    }
     state.fwPhase = 'done'
     log('ok', `firmware is now ${state.info?.version?.seVersion ?? state.info?.app?.version ?? 'updated'}`)
   } catch (e) {

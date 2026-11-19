@@ -797,6 +797,22 @@ impl HwDevice {
         )
     }
 
+    /// Last step on devices whose final firmware has its own image (Nano S):
+    /// with the device running the OS updater, install the final firmware.
+    /// The device restarts afterwards.
+    #[wasm_bindgen(js_name = installFinalFirmware)]
+    pub async fn install_final_firmware(
+        &self,
+        update: JsValue,
+        on_event: Option<Function>,
+    ) -> JsResult<()> {
+        let u: FirmwareUpdate = from_js(update)?;
+        self.manager()
+            .install_final_firmware(&self.device, &u, &mut emitter(on_event))
+            .await
+            .map_err(js_err)
+    }
+
     /// Bootloader mode recovery: flash the MCU required by the installed
     /// firmware. Returns "mcu", "bootloader" or `null` if not in bootloader.
     #[wasm_bindgen(js_name = repairMcu)]

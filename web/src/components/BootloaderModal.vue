@@ -2,7 +2,7 @@
 // Shown on any tab when the connected device is in bootloader mode (an
 // interrupted or ongoing firmware update): offers to finish it right away.
 import { ref, computed } from 'vue'
-import { state, finishBootloaderUpdate, errorText, connect } from '../lib/store.js'
+import { state, finishBootloaderUpdate, errorText, connect, ENTER_BOOTLOADER } from '../lib/store.js'
 
 const running = ref(false)
 const done = ref(false)
@@ -16,6 +16,7 @@ const visible = computed(
   () => running.value || done.value || (inBootloader.value && !state.bootloaderDismissed && !handledElsewhere.value),
 )
 const phaseText = computed(() => {
+  if (state.fwPhase === 'enterBootloader') return `${ENTER_BOOTLOADER}.`
   if (state.fwPhase === 'reboot' || state.reconnecting) return 'Waiting for the device to restart…'
   if (state.busy) return state.busy
   return 'Working…'
