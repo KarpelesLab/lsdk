@@ -2103,11 +2103,18 @@ async fn run(cli: Cli) -> Result<()> {
                             "no separate final firmware"
                         }
                     );
-                    if !os.is_osu && !os.is_bootloader {
-                        eprintln!("> installing the OS updater: confirm on the device");
-                        manager.install_osu(&d, &u, &mut progress).await?;
-                    }
-                    drop(d);
+                    // Already in the OS updater with nothing to flash: the open
+                    // connection is the one the final firmware goes through.
+                    let mut ready = if os.is_osu && !u.should_flash_mcu {
+                        Some(d)
+                    } else {
+                        if !os.is_osu && !os.is_bootloader {
+                            eprintln!("> installing the OS updater: confirm on the device");
+                            manager.install_osu(&d, &u, &mut progress).await?;
+                        }
+                        drop(d);
+                        None
+                    };
                     // Reopen the device (it reboots between steps) and read its state.
                     // Each new state seen is logged, so waits are visible.
                     async fn state(
@@ -2146,7 +2153,9 @@ async fn run(cli: Cli) -> Result<()> {
                         drop(last);
                         Ok((d, os))
                     }
-                    eprintln!("> waiting for the device to come back");
+                    if ready.is_none() {
+                        eprintln!("> waiting for the device to come back");
+                    }
                     if u.should_flash_mcu {
                         // The device must be put in bootloader mode by hand.
                         let start = std::time::Instant::now();
@@ -2193,6 +2202,9 @@ async fn run(cli: Cli) -> Result<()> {
                         // Back in the OS updater ("Update"): send the final firmware.
                         let start = std::time::Instant::now();
                         let d = loop {
+                            if let Some(d) = ready.take() {
+                                break d;
+                            }
                             if start.elapsed() > Duration::from_secs(5 * 60) {
                                 return Err(Error::App(
                                     "the device did not come back to the OS updater (\"Update\")"
