@@ -526,6 +526,19 @@ enum FirmwareCmd {
         #[arg(long)]
         osu: Option<String>,
     },
+    /// List the update paths from the installed firmware (OSUs, with the
+    /// catalog's script names, hashes and sizes).
+    Paths {
+        /// How many updates deep to follow.
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        /// Also list OSUs not distributed to this device's provider.
+        #[arg(long)]
+        all_providers: bool,
+        /// Print the full data as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair,
     /// Firmware integrity hash (vendor HSM sessions only: refused with a custom CA).
@@ -673,6 +686,87 @@ const GENUINE_NOTE: &str = "A successful genuine check proves the secure element
 
 fn print<T: Serialize>(v: &T) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+}
+
+fn print_firmware_paths(p: &lsdk::manager::ops::FirmwarePaths) {
+    use lsdk::manager::api::CatalogFinal;
+    fn opt(v: &Option<String>) -> &str {
+        v.as_deref().filter(|s| !s.is_empty()).unwrap_or("-")
+    }
+    fn final_line(f: &CatalogFinal) -> String {
+        format!(
+            "{} (final id {}, OS {} bytes, providers {:?}, device versions {:?})",
+            f.name,
+            f.id,
+            f.bytes.map(|b| b.to_string()).unwrap_or_else(|| "?".into()),
+            f.providers,
+            f.device_versions
+        )
+    }
+    fn walk(paths: &[lsdk::manager::ops::FirmwarePath], indent: &str) {
+        for (i, x) in paths.iter().enumerate() {
+            let last = i + 1 == paths.len();
+            let (branch, cont) = if last {
+                ("└─ ", "   ")
+            } else {
+                ("├─ ", "│  ")
+            };
+            let sub = format!("{indent}{cont}");
+            let o = &x.osu;
+            println!(
+                "{indent}{branch}{} (OSU id {}){} → {}",
+                o.name,
+                o.id,
+                if x.available {
+                    ""
+                } else {
+                    " [not distributed to this provider]"
+                },
+                final_line(&x.target)
+            );
+            println!("{sub}  osu script   {}", opt(&o.firmware));
+            println!("{sub}  osu key      {}", opt(&o.firmware_key));
+            println!("{sub}  osu hash     {}", opt(&o.hash));
+            println!(
+                "{sub}  osu          perso {}, providers {:?}, device versions {:?}, created {}, modified {}",
+                opt(&o.perso),
+                o.providers,
+                o.device_versions,
+                opt(&o.date_creation),
+                opt(&o.date_last_modified)
+            );
+            let t = &x.target;
+            println!("{sub}  final script {}", opt(&t.firmware));
+            println!("{sub}  final key    {}", opt(&t.firmware_key));
+            println!("{sub}  final hash   {}", opt(&t.hash));
+            let mcus: Vec<String> = t
+                .mcu_versions
+                .iter()
+                .zip(&x.target_mcu_names)
+                .map(|(id, n)| format!("{n} (id {id})"))
+                .collect();
+            println!(
+                "{sub}  final        perso {}, MCU {}",
+                opt(&t.perso),
+                if mcus.is_empty() {
+                    "-".into()
+                } else {
+                    mcus.join(", ")
+                }
+            );
+            walk(&x.next, &sub);
+        }
+    }
+    println!(
+        "{} (device version {}, provider {})",
+        final_line(&p.current),
+        p.device_version,
+        p.provider
+    );
+    if p.paths.is_empty() {
+        println!("└─ no update path");
+    }
+    walk(&p.paths, "");
 }
 
 fn progress(ev: HsmEvent) {
@@ -1903,6 +1997,22 @@ async fn run(cli: Cli) -> Result<()> {
                 hex::encode(chan.hash_firmware(address, length).await?)
             );
         }
+        Cmd::Firmware {
+            cmd:
+                FirmwareCmd::Paths {
+                    depth,
+                    all_providers,
+                    json,
+                },
+        } => {
+            let os = open(&cli)?.get_version().await?;
+            let p = manager.firmware_paths(&os, *depth, *all_providers).await?;
+            if *json {
+                print(&p);
+            } else {
+                print_firmware_paths(&p);
+            }
+        }
         Cmd::Firmware { cmd } => {
             let d = open(&cli)?;
             let os = d.get_version().await?;
@@ -1941,7 +2051,9 @@ async fn run(cli: Cli) -> Result<()> {
                 manager.firmware_update_via(&os, osu).await?
             };
             match (cmd, update) {
-                (FirmwareCmd::Repair | FirmwareCmd::Hash { .. }, _) => unreachable!(),
+                (FirmwareCmd::Repair | FirmwareCmd::Hash { .. } | FirmwareCmd::Paths { .. }, _) => {
+                    unreachable!()
+                }
                 (_, None) => println!("firmware {} is up to date", os.se_version),
                 (FirmwareCmd::Check { .. }, Some(u)) => print(&u),
                 (FirmwareCmd::Update { .. }, Some(u)) => {

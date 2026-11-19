@@ -71,6 +71,65 @@ pub struct OsuFirmware {
     pub display_name: Option<String>,
 }
 
+/// A final firmware from the full catalog (`/firmware_final_versions`),
+/// with the OS updaters leading to it. Release notes are left out.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CatalogFinal {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub perso: Option<String>,
+    #[serde(default)]
+    pub firmware: Option<String>,
+    #[serde(default)]
+    pub firmware_key: Option<String>,
+    #[serde(default)]
+    pub hash: Option<String>,
+    /// OS size, as used by Ledger Live to compute the space left for apps.
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub mcu_versions: Vec<u32>,
+    #[serde(default)]
+    pub device_versions: Vec<u32>,
+    #[serde(default)]
+    pub providers: Vec<u32>,
+    #[serde(default)]
+    pub date_creation: Option<String>,
+    #[serde(default)]
+    pub date_last_modified: Option<String>,
+    #[serde(default)]
+    pub osu_versions: Vec<CatalogOsu>,
+}
+
+/// An OS updater from the full catalog. Release notes are left out.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CatalogOsu {
+    pub id: u32,
+    pub name: String,
+    #[serde(default)]
+    pub perso: Option<String>,
+    #[serde(default)]
+    pub firmware: Option<String>,
+    #[serde(default)]
+    pub firmware_key: Option<String>,
+    #[serde(default)]
+    pub hash: Option<String>,
+    pub next_se_firmware_final_version: u32,
+    #[serde(default)]
+    pub previous_se_firmware_final_versions: Vec<u32>,
+    #[serde(default)]
+    pub device_versions: Vec<u32>,
+    #[serde(default)]
+    pub providers: Vec<u32>,
+    #[serde(default)]
+    pub date_creation: Option<String>,
+    #[serde(default)]
+    pub date_last_modified: Option<String>,
+}
+
 /// An MCU firmware version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McuVersion {
@@ -353,6 +412,11 @@ impl ManagerApi {
             "success" => Ok(r.se_firmware_osu_version),
             other => Err(Error::Http(format!("get_latest_firmware: {other}"))),
         }
+    }
+
+    /// Every final firmware with its OS updaters (all devices).
+    pub async fn get_firmware_catalog(&self) -> Result<Vec<CatalogFinal>> {
+        self.get("/firmware_final_versions", &[]).await
     }
 
     /// All MCU versions.

@@ -9,8 +9,8 @@ use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::hsm::{self, HsmEvent};
 use crate::manager::api::{
-    self, Application, DeviceVersion, FinalFirmware, LanguagePackage, ManagerApi, McuVersion,
-    OsuFirmware,
+    self, Application, CatalogFinal, CatalogOsu, DeviceVersion, FinalFirmware, LanguagePackage,
+    ManagerApi, McuVersion, OsuFirmware,
 };
 use crate::os::{InstalledApp, OsVersion};
 use crate::transport::Transport;
@@ -86,6 +86,32 @@ pub struct HsmListedApp {
     pub hash: String,
     #[serde(default)]
     pub hash_code_data: Option<String>,
+}
+
+/// One OS updater reachable from a final firmware, and what follows it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwarePath {
+    pub osu: CatalogOsu,
+    /// The final firmware the OSU installs.
+    pub target: CatalogFinal,
+    /// Names of the MCU versions the target accepts (same order as
+    /// `target.mcu_versions`).
+    pub target_mcu_names: Vec<String>,
+    /// Whether the OSU is distributed to the device's provider (otherwise the
+    /// API won't hand it out).
+    pub available: bool,
+    pub next: Vec<FirmwarePath>,
+}
+
+/// Update paths from the device's current firmware.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwarePaths {
+    pub current: CatalogFinal,
+    pub device_version: u32,
+    pub provider: u32,
+    pub paths: Vec<FirmwarePath>,
 }
 
 impl Manager {
@@ -459,6 +485,114 @@ impl Manager {
             final_firmware,
             should_flash_mcu,
         }))
+    }
+
+    /// Update paths from the device's current final firmware, `depth` OSUs
+    /// deep, from the full catalog. With `all_providers`, OSUs not
+    /// distributed to the device's provider are listed too (marked
+    /// unavailable, and not followed further).
+    pub async fn firmware_paths(
+        &self,
+        os: &OsVersion,
+        depth: usize,
+        all_providers: bool,
+    ) -> Result<FirmwarePaths> {
+        if os.is_bootloader || os.is_osu {
+            return Err(Error::App(
+                "a firmware update is in progress: finish it first".into(),
+            ));
+        }
+        let provider = os.provider_id();
+        let dv = self.api.get_device_version(os.target_id, provider).await?;
+        let current_id = self
+            .api
+            .get_firmware_version(dv.id, &os.version(), provider)
+            .await?
+            .id;
+        let catalog = self.api.get_firmware_catalog().await?;
+        let mcus = self.api.get_mcu_versions().await?;
+        let current = catalog
+            .iter()
+            .find(|f| f.id == current_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::NotFound(format!("final firmware {current_id} not in catalog"))
+            })?;
+        struct Ctx<'a> {
+            catalog: &'a [CatalogFinal],
+            mcus: &'a [McuVersion],
+            provider: u32,
+            all: bool,
+        }
+        fn walk(
+            cx: &Ctx,
+            from: u32,
+            dvs: &[u32],
+            depth: usize,
+            seen: &mut Vec<u32>,
+        ) -> Vec<FirmwarePath> {
+            let mut out = Vec::new();
+            if depth == 0 {
+                return out;
+            }
+            for f in cx.catalog {
+                for o in &f.osu_versions {
+                    if !o.previous_se_firmware_final_versions.contains(&from)
+                        || !o.device_versions.iter().any(|d| dvs.contains(d))
+                    {
+                        continue;
+                    }
+                    let available = o.providers.contains(&cx.provider);
+                    if !available && !cx.all {
+                        continue;
+                    }
+                    let next = if available && !seen.contains(&f.id) {
+                        seen.push(f.id);
+                        let n = walk(cx, f.id, &f.device_versions, depth - 1, seen);
+                        seen.pop();
+                        n
+                    } else {
+                        Vec::new()
+                    };
+                    let mut target = f.clone();
+                    target.osu_versions.clear();
+                    out.push(FirmwarePath {
+                        osu: o.clone(),
+                        target_mcu_names: f
+                            .mcu_versions
+                            .iter()
+                            .map(|id| {
+                                cx.mcus
+                                    .iter()
+                                    .find(|m| m.id == *id)
+                                    .map(|m| m.name.clone())
+                                    .unwrap_or_else(|| "?".into())
+                            })
+                            .collect(),
+                        target,
+                        available,
+                        next,
+                    });
+                }
+            }
+            out.sort_by_key(|p| (!p.available, p.target.id, p.osu.id));
+            out
+        }
+        let cx = Ctx {
+            catalog: &catalog,
+            mcus: &mcus,
+            provider,
+            all: all_providers,
+        };
+        let paths = walk(&cx, current_id, &[dv.id], depth, &mut vec![current_id]);
+        let mut current = current;
+        current.osu_versions.clear();
+        Ok(FirmwarePaths {
+            current,
+            device_version: dv.id,
+            provider,
+            paths,
+        })
     }
 
     /// Step 1 of a firmware update: install the OS updater. The user confirms
