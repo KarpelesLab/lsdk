@@ -2068,19 +2068,67 @@ async fn run(cli: Cli) -> Result<()> {
                         &pending_path,
                         serde_json::to_string(&u).unwrap_or_default(),
                     );
+                    eprintln!(
+                        "> plan: {}, {}, {}",
+                        if os.is_osu || os.is_bootloader {
+                            "OS updater already installed"
+                        } else {
+                            "install the OS updater"
+                        },
+                        if u.should_flash_mcu {
+                            format!(
+                                "flash the MCU (device has {}, the target needs MCU ids {:?})",
+                                os.mcu_version(),
+                                u.final_firmware.mcu_versions
+                            )
+                        } else {
+                            "no MCU flash".into()
+                        },
+                        if lsdk::manager::Manager::needs_final_install(&u) {
+                            "then the final firmware"
+                        } else {
+                            "no separate final firmware"
+                        }
+                    );
                     if !os.is_osu && !os.is_bootloader {
                         eprintln!("> installing the OS updater: confirm on the device");
                         manager.install_osu(&d, &u, &mut progress).await?;
                     }
                     drop(d);
                     // Reopen the device (it reboots between steps) and read its state.
+                    // Each new state seen is logged, so waits are visible.
                     async fn state(
                         wait: Duration,
                     ) -> Result<(Device<HidTransport>, lsdk::os::OsVersion)> {
+                        static LAST: std::sync::Mutex<String> =
+                            std::sync::Mutex::new(String::new());
                         let d = Device::new(HidTransport::wait_and_open(wait)?);
                         let os = d.get_version().await?;
+                        let seen = format!(
+                            "{}{} (MCU {})",
+                            os.raw_version,
+                            if os.is_bootloader {
+                                " [bootloader]"
+                            } else if os.is_osu {
+                                " [OS updater]"
+                            } else {
+                                ""
+                            },
+                            if os.is_bootloader {
+                                &os.mcu_bootloader_version
+                            } else {
+                                os.mcu_version()
+                            }
+                        );
+                        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                        if *last != seen {
+                            eprintln!("> device: {seen}");
+                            *last = seen;
+                        }
+                        drop(last);
                         Ok((d, os))
                     }
+                    eprintln!("> waiting for the device to come back");
                     if u.should_flash_mcu {
                         // The device must be put in bootloader mode by hand.
                         let start = std::time::Instant::now();
