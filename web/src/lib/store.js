@@ -182,6 +182,8 @@ export function hsmEvent(ev) {
     case 'progress':
       state.prompt = null
       state.progress = ev.total ? ev.index / ev.total : 0
+      if (ev.index === 0) log('info', `streaming ${ev.total} APDUs, ${ev.totalBytes} bytes`)
+      else if (ev.index === ev.total) log('info', `sent ${ev.totalBytes} bytes`)
       break
     case 'warning':
       log('warn', ev.message)

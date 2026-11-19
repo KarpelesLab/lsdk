@@ -41,8 +41,15 @@ pub enum HsmEvent {
         apdu: Vec<u8>,
         status: u16,
     },
-    /// Bulk phase progress (`index` APDUs out of `total` sent).
-    Progress { index: usize, total: usize },
+    /// Bulk phase progress (`index` APDUs out of `total` sent; `bytes` out
+    /// of `total_bytes` APDU data bytes, i.e. without the 5-byte headers).
+    Progress {
+        index: usize,
+        total: usize,
+        bytes: usize,
+        #[cfg_attr(feature = "serde", serde(rename = "totalBytes"))]
+        total_bytes: usize,
+    },
     /// Warning from the HSM.
     Warning { message: String },
 }
@@ -56,7 +63,7 @@ impl HsmEvent {
     /// Progress in `0.0..=1.0`, for progress events.
     pub fn progress(&self) -> Option<f64> {
         match self {
-            HsmEvent::Progress { index, total } if *total > 0 => {
+            HsmEvent::Progress { index, total, .. } if *total > 0 => {
                 Some(*index as f64 / *total as f64)
             }
             _ => None,
@@ -240,7 +247,15 @@ async fn run_inner<T: Transport + ?Sized>(
                     .collect::<core::result::Result<_, _>>()
                     .map_err(|e| Error::Hsm(format!("bad bulk APDU hex: {e}")))?;
                 let total = list.len();
-                on_event(HsmEvent::Progress { index: 0, total });
+                let data_len = |a: &Vec<u8>| a.len().saturating_sub(5);
+                let total_bytes = list.iter().map(data_len).sum();
+                let mut bytes = 0;
+                on_event(HsmEvent::Progress {
+                    index: 0,
+                    total,
+                    bytes,
+                    total_bytes,
+                });
                 for (i, apdu) in list.iter().enumerate() {
                     let resp = Response::from_raw(transport.exchange(apdu).await?)?;
                     on_event(HsmEvent::Exchange {
@@ -255,9 +270,12 @@ async fn run_inner<T: Transport + ?Sized>(
                             hex::encode(&apdu[..apdu.len().min(5)])
                         )));
                     }
+                    bytes += data_len(apdu);
                     on_event(HsmEvent::Progress {
                         index: i + 1,
                         total,
+                        bytes,
+                        total_bytes,
                     });
                 }
                 return Ok(HsmOutcome {

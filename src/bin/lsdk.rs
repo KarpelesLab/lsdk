@@ -671,8 +671,13 @@ fn progress(ev: HsmEvent) {
     match ev {
         HsmEvent::PermissionRequested => eprintln!("> allow the secure connection on the device"),
         HsmEvent::PermissionGranted => eprintln!("> secure connection allowed"),
-        HsmEvent::Progress { index, total } => {
-            eprint!("\r> {index}/{total}");
+        HsmEvent::Progress {
+            index,
+            total,
+            bytes,
+            total_bytes,
+        } => {
+            eprint!("\r> {index}/{total} APDUs, {bytes}/{total_bytes} bytes");
             if index == total {
                 eprintln!();
             }
