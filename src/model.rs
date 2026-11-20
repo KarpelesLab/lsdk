@@ -75,6 +75,16 @@ impl DeviceModel {
         }
     }
 
+    /// Flash page size: the SDK linker scripts align an app's NVRAM data
+    /// and install parameters on it.
+    pub fn flash_page_size(self) -> u32 {
+        match self {
+            DeviceModel::NanoS => 64,
+            DeviceModel::NanoX => 256,
+            _ => 512,
+        }
+    }
+
     /// Target id mask (`target_id & 0xffff0000`).
     pub fn target_id_mask(self) -> u32 {
         match self {

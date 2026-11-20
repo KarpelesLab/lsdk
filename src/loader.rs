@@ -385,16 +385,17 @@ impl AppImage {
         Ok(img)
     }
 
-    /// Firmware 1.4 and later: the image with `reserve` more bytes of NVRAM
-    /// data after its data, the install parameters moved after them (code,
-    /// data and install parameters each start on a 64-byte page, per the
-    /// SDK linker script). The reserved bytes are not part of any area, so
-    /// they are not loaded. `reserve` must be a multiple of 64.
-    pub fn with_data_reserve(&self, reserve: u32) -> Result<AppImage> {
-        if !reserve.is_multiple_of(64) {
+    /// Firmware 1.4 and later (and every newer model): the image with
+    /// `reserve` more bytes of NVRAM data after its data, the install
+    /// parameters moved after them. Code, data and install parameters each
+    /// start on a flash page (`page`: [`reserve_page_size`]), per the SDK
+    /// linker scripts, so `reserve` must be a multiple of it. The reserved
+    /// bytes are not part of any area: they are not loaded.
+    pub fn with_data_reserve(&self, reserve: u32, page: u32) -> Result<AppImage> {
+        if !reserve.is_multiple_of(page) {
             return Err(Error::InvalidInput(format!(
-                "reserve must be a multiple of 64 (flash page) on firmware 1.4 and later, e.g. {}",
-                reserve.div_ceil(64) * 64
+                "reserve must be a multiple of the {page}-byte flash page, e.g. {}",
+                reserve.div_ceil(page) * page
             )));
         }
         let ip_start = self.min_address() + self.image_size() - self.install_params_size;
@@ -477,6 +478,14 @@ impl AppImage {
     }
 }
 
+/// Flash page size for a target id, which a 1.4+ reserve must be a multiple
+/// of (512, the largest, when the model is unknown).
+pub fn reserve_page_size(target_id: u32) -> u32 {
+    crate::model::DeviceModel::from_target_id(target_id)
+        .map(|m| m.flash_page_size())
+        .unwrap_or(512)
+}
+
 /// BOLOS TLV (as ledgerblue `encodetlv`): tag, BER-style length, value.
 fn tlv(tag: u8, v: &[u8]) -> Result<Vec<u8>> {
     let mut out = vec![tag];
@@ -527,7 +536,8 @@ pub struct InstallOptions<'a> {
     /// Extra bytes declared in `CREATE_APP` but not loaded (experimental:
     /// contents are whatever the device leaves there). Before 1.4 they are
     /// added to the single length, after the image; from 1.4 on to the data
-    /// length (a multiple of 64), before the install parameters (see
+    /// length (a multiple of the flash page: 64 on Nano S, 256 on Nano X,
+    /// 512 on newer models), before the install parameters (see
     /// [`AppImage::with_data_reserve`]). Without `reserve_pad`, a bare
     /// `SET_LOAD_OFFSET` to the reserved area's last byte is sent after the
     /// image.
@@ -597,7 +607,7 @@ pub async fn install_app_with<T: Transport>(
         // build them when the image has none (HEX), then add the reserve.
         let mut img = image.with_default_install_params(Some(&icon))?;
         if opts.reserve > 0 {
-            img = img.with_data_reserve(opts.reserve)?;
+            img = img.with_data_reserve(opts.reserve, reserve_page_size(chan.version.target_id))?;
         }
         stripped = img;
         create_params = stripped.create_app_params()?;
@@ -716,8 +726,9 @@ mod tests {
         img.entry = 0x1000;
         img.data_size = 64;
         img.install_params_size = 16;
-        assert!(img.with_data_reserve(100).is_err());
-        let r = img.with_data_reserve(256).unwrap();
+        assert!(img.with_data_reserve(100, 64).is_err());
+        assert!(img.with_data_reserve(256, 512).is_err());
+        let r = img.with_data_reserve(256, 64).unwrap();
         assert_eq!(r.code_length().unwrap(), 128);
         assert_eq!(r.data_size, 64 + 256);
         assert_eq!(r.image_size(), 208 + 256);

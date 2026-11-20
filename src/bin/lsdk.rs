@@ -465,7 +465,8 @@ enum AppCmd {
         icon: Option<String>,
         /// Extra bytes declared without loading them (experimental). Before
         /// 1.4: after the image. From 1.4 on: more NVRAM data after the
-        /// app's data, before its install parameters (multiple of 64).
+        /// app's data, before its install parameters (multiple of the flash
+        /// page: 64 on Nano S, 256 on Nano X, 512 on newer models).
         #[arg(long, default_value_t = 0)]
         reserve: u32,
         /// Bytes actually loaded at the end of the
@@ -1886,7 +1887,14 @@ async fn run(cli: Cli) -> Result<()> {
                         .unwrap_or_default();
                     let mut reserved = img.with_default_install_params(Some(&icon_or_params))?;
                     if *reserve > 0 {
-                        reserved = reserved.with_data_reserve(*reserve)?;
+                        // The device isn't known on a dry run: check the page
+                        // of the image's target (ELF), else none (the install
+                        // checks it against the device).
+                        let page = img
+                            .target_id
+                            .map(lsdk::loader::reserve_page_size)
+                            .unwrap_or(1);
+                        reserved = reserved.with_data_reserve(*reserve, page)?;
                     }
                     println!("create_app {}", hex::encode(reserved.create_app_params()?));
                     println!(
