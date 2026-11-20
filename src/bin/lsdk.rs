@@ -439,6 +439,9 @@ enum AppCmd {
         /// HEX input: app name.
         #[arg(long)]
         name: Option<String>,
+        /// HEX input: app version (install parameters, firmware 1.4+).
+        #[arg(long)]
+        app_version: Option<String>,
         /// HEX input: app flags (e.g. 0x200).
         #[arg(long)]
         flags: Option<String>,
@@ -1815,6 +1818,7 @@ async fn run(cli: Cli) -> Result<()> {
                 sign,
                 sign_key,
                 name,
+                app_version,
                 flags,
                 api_level,
                 data_size,
@@ -1852,6 +1856,9 @@ async fn run(cli: Cli) -> Result<()> {
                 if api_level.is_some() {
                     img.api_level = *api_level;
                 }
+                if app_version.is_some() {
+                    img.version = app_version.clone();
+                }
                 if let Some(v) = data_size {
                     img.data_size = *v;
                 }
@@ -1873,11 +1880,14 @@ async fn run(cli: Cli) -> Result<()> {
                         .unwrap_or_else(|| "?".into())
                 );
                 if *dry_run {
-                    let reserved = if *reserve > 0 {
-                        img.with_data_reserve(*reserve)?
-                    } else {
-                        img.clone()
-                    };
+                    let icon_or_params = icon
+                        .clone()
+                        .or_else(|| img.install_params_icon())
+                        .unwrap_or_default();
+                    let mut reserved = img.with_default_install_params(Some(&icon_or_params))?;
+                    if *reserve > 0 {
+                        reserved = reserved.with_data_reserve(*reserve)?;
+                    }
                     println!("create_app {}", hex::encode(reserved.create_app_params()?));
                     println!(
                         "create_app (pre-1.4) {}",
@@ -1890,7 +1900,7 @@ async fn run(cli: Cli) -> Result<()> {
                         )
                     );
                     if let Some(t) = img.target_id {
-                        println!("app hash {}", hex::encode(img.app_hash(t)?));
+                        println!("app hash {}", hex::encode(reserved.app_hash(t)?));
                     }
                     return Ok(());
                 }

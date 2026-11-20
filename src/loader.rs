@@ -352,6 +352,39 @@ impl AppImage {
         Ok(d)
     }
 
+    /// Firmware 1.4 and later, for an image without install parameters
+    /// (e.g. from a HEX): append the TLV block ledgerblue's `loadApp --tlv`
+    /// builds, right after the image: app name (tag 1), version (tag 2) when
+    /// known, icon (tag 3) when given, derivation path (tag 4, `ff`: any
+    /// curve, no path restriction). Images that already have install
+    /// parameters are returned unchanged.
+    pub fn with_default_install_params(&self, icon: Option<&[u8]>) -> Result<AppImage> {
+        if self.install_params_size > 0 {
+            return Ok(self.clone());
+        }
+        if !self.data_size.is_multiple_of(64) {
+            return Err(Error::InvalidInput(
+                "data size must be a multiple of 64 to append install parameters".into(),
+            ));
+        }
+        let mut p = tlv(0x01, self.name.as_bytes())?;
+        if let Some(v) = self.version.as_deref().filter(|v| !v.is_empty()) {
+            p.extend(tlv(0x02, v.as_bytes())?);
+        }
+        if let Some(i) = icon.filter(|i| !i.is_empty()) {
+            p.extend(tlv(0x03, i)?);
+        }
+        p.extend(tlv(0x04, &[0xff])?);
+        let mut img = self.clone();
+        img.install_params_size = p.len() as u32;
+        img.areas.push(Area {
+            address: self.min_address() + self.image_size(),
+            data: p,
+        });
+        img.areas = merge(img.areas);
+        Ok(img)
+    }
+
     /// Firmware 1.4 and later: the image with `reserve` more bytes of NVRAM
     /// data after its data, the install parameters moved after them (code,
     /// data and install parameters each start on a 64-byte page, per the
@@ -442,6 +475,22 @@ impl AppImage {
         d.extend(self.flat_image());
         Ok(purecrypto::hash::sha256(&d))
     }
+}
+
+/// BOLOS TLV (as ledgerblue `encodetlv`): tag, BER-style length, value.
+fn tlv(tag: u8, v: &[u8]) -> Result<Vec<u8>> {
+    let mut out = vec![tag];
+    match v.len() {
+        n if n < 0x80 => out.push(n as u8),
+        n if n < 0x100 => out.extend([0x81, n as u8]),
+        n if n < 0x10000 => {
+            out.push(0x82);
+            out.extend((n as u16).to_be_bytes());
+        }
+        _ => return Err(Error::InvalidInput("install parameter too long".into())),
+    }
+    out.extend_from_slice(v);
+    Ok(out)
 }
 
 /// CRC-16/CCITT-FALSE, as checked by `SECUREINS_CRC`.
@@ -543,13 +592,16 @@ pub async fn install_app_with<T: Transport>(
         create_params = image.create_app_params_pre_1_4(&icon, opts.reserve)?;
         stripped = image.without_install_params();
         &stripped
-    } else if opts.reserve > 0 {
-        stripped = image.with_data_reserve(opts.reserve)?;
+    } else {
+        // 1.4+ reads the name, version and icon from the install parameters:
+        // build them when the image has none (HEX), then add the reserve.
+        let mut img = image.with_default_install_params(Some(&icon))?;
+        if opts.reserve > 0 {
+            img = img.with_data_reserve(opts.reserve)?;
+        }
+        stripped = img;
         create_params = stripped.create_app_params()?;
         &stripped
-    } else {
-        create_params = image.create_app_params()?;
-        image
     };
     chan.exchange(ins::CREATE_APP, &create_params).await?;
     let min = image.min_address();
@@ -629,19 +681,11 @@ pub async fn install_app_with<T: Transport>(
             d
         }
         (false, Some(key)) => {
-            let hash = if opts.reserve > 0 {
-                // The reserved area is never loaded: hash what was, in
-                // order (ledgerblue hashes the loaded chunks the same way).
-                let mut d = chan.version.target_id.to_be_bytes().to_vec();
-                d.extend_from_slice(&create_params);
-                for a in &areas {
-                    d.extend_from_slice(&a.data);
-                }
-                purecrypto::hash::sha256(&d)
-            } else {
-                image.app_hash(chan.version.target_id)?
-            };
-            let sig = key.sign_digest(&hash)?;
+            // As ledgerblue's hashApp: gaps (the unloaded reserve) count as
+            // zeros; the reserve pad is part of the image.
+            let mut hashed = image.clone();
+            hashed.areas = areas.clone();
+            let sig = key.sign_digest(&hashed.app_hash(chan.version.target_id)?)?;
             let mut d = vec![sig.len() as u8];
             d.extend(sig);
             d
@@ -683,6 +727,33 @@ mod tests {
         assert_eq!(r.areas[1].address, 0x1000 + 192 + 256);
         assert_eq!(r.areas[1].data[0], 192);
         assert_eq!(r.install_params(), img.install_params());
+    }
+
+    #[test]
+    fn default_install_params() {
+        let mut img = AppImage::from_ihex(":00000001FF\n", "Flash Scan").unwrap();
+        img.areas = vec![Area {
+            address: 0x1000,
+            data: vec![0xaa; 100],
+        }];
+        img.version = Some("1.0".into());
+        let p = img.with_default_install_params(Some(&[1, 2])).unwrap();
+        let want = [
+            &[0x01, 10][..],
+            b"Flash Scan",
+            &[0x02, 3],
+            b"1.0",
+            &[0x03, 2, 1, 2],
+            &[0x04, 1, 0xff],
+        ]
+        .concat();
+        assert_eq!(p.install_params(), want);
+        assert_eq!(p.install_params_size as usize, want.len());
+        assert_eq!(p.code_length().unwrap(), 100);
+        assert_eq!(p.areas.len(), 1);
+        // Already there: unchanged.
+        assert_eq!(p.with_default_install_params(None).unwrap(), p);
+        assert_eq!(tlv(3, &[0; 200]).unwrap()[..3], [3, 0x81, 200]);
     }
 
     #[test]
