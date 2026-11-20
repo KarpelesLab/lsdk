@@ -430,63 +430,11 @@ enum CaCmd {
 enum AppCmd {
     /// Install an app from its ELF (or Intel HEX with --name and friends).
     Load {
-        file: std::path::PathBuf,
+        #[command(flatten)]
+        args: LoadArgs,
         /// CA key file (default: the lsdk CA key).
         #[arg(long)]
         key: Option<std::path::PathBuf>,
-        /// Keep an installed app with the same name (fails if present).
-        #[arg(long)]
-        no_replace: bool,
-        /// Only print what would be installed.
-        #[arg(long)]
-        dry_run: bool,
-        /// Sign the app hash with the CA key (or --sign-key) at commit.
-        #[arg(long)]
-        sign: bool,
-        /// Key file to sign the app with (implies --sign).
-        #[arg(long)]
-        sign_key: Option<std::path::PathBuf>,
-        /// HEX input: app name.
-        #[arg(long)]
-        name: Option<String>,
-        /// HEX input: app version (install parameters, firmware 1.4+).
-        #[arg(long)]
-        app_version: Option<String>,
-        /// HEX input: app flags (e.g. 0x200).
-        #[arg(long)]
-        flags: Option<String>,
-        /// HEX input: API level.
-        #[arg(long)]
-        api_level: Option<u8>,
-        /// HEX input: NVRAM data size.
-        #[arg(long)]
-        data_size: Option<u32>,
-        /// HEX input: install parameters size.
-        #[arg(long)]
-        install_params_size: Option<u32>,
-        /// Old CREATE APP layout, without the API level byte: firmware older
-        /// than API levels (e.g. Nano S Plus 1.0.x, which answers 0x6512).
-        #[arg(long)]
-        legacy_layout: bool,
-        /// Firmware before 1.4 (e.g. Nano S 1.3.x): dashboard icon, hex
-        /// (`icon.py <gif> hexbitmaponly`). Defaults to the icon of the
-        /// install parameters, if any.
-        #[arg(long)]
-        icon: Option<String>,
-        /// Extra bytes declared without loading them (experimental). Before
-        /// 1.4: after the image. From 1.4 on: more NVRAM data after the
-        /// app's data, before its install parameters (multiple of the flash
-        /// page: 64 on Nano S, 256 on Nano X, 512 on newer models).
-        #[arg(long, default_value_t = 0)]
-        reserve: u32,
-        /// Bytes actually loaded at the end of the
-        /// reserved area (at most --reserve), zeros unless
-        /// --reserve-pad-pattern is given.
-        #[arg(long, default_value_t = 0)]
-        reserve_pad: u32,
-        /// Hex pattern repeated over the reserve pad (e.g. ff, deadbeef).
-        #[arg(long)]
-        reserve_pad_pattern: Option<String>,
     },
     /// Delete an app by name (or --hash).
     Delete {
@@ -507,6 +455,66 @@ enum AppCmd {
         #[arg(long)]
         key: Option<std::path::PathBuf>,
     },
+}
+
+/// App image and install options (`app load`, console `install`).
+#[derive(clap::Args)]
+struct LoadArgs {
+    file: std::path::PathBuf,
+    /// Keep an installed app with the same name (fails if present).
+    #[arg(long)]
+    no_replace: bool,
+    /// Only print what would be installed.
+    #[arg(long)]
+    dry_run: bool,
+    /// Sign the app hash with the CA key (in the console: the channel
+    /// key), or --sign-key, at commit.
+    #[arg(long)]
+    sign: bool,
+    /// Key file to sign the app with (implies --sign).
+    #[arg(long)]
+    sign_key: Option<std::path::PathBuf>,
+    /// HEX input: app name.
+    #[arg(long)]
+    name: Option<String>,
+    /// HEX input: app version (install parameters, firmware 1.4+).
+    #[arg(long)]
+    app_version: Option<String>,
+    /// HEX input: app flags (e.g. 0x200).
+    #[arg(long)]
+    flags: Option<String>,
+    /// HEX input: API level.
+    #[arg(long)]
+    api_level: Option<u8>,
+    /// HEX input: NVRAM data size.
+    #[arg(long)]
+    data_size: Option<u32>,
+    /// HEX input: install parameters size.
+    #[arg(long)]
+    install_params_size: Option<u32>,
+    /// Old CREATE APP layout, without the API level byte: firmware older
+    /// than API levels (e.g. Nano S Plus 1.0.x, which answers 0x6512).
+    #[arg(long)]
+    legacy_layout: bool,
+    /// Firmware before 1.4 (e.g. Nano S 1.3.x): dashboard icon, hex
+    /// (`icon.py <gif> hexbitmaponly`). Defaults to the icon of the
+    /// install parameters, if any.
+    #[arg(long)]
+    icon: Option<String>,
+    /// Extra bytes declared without loading them (experimental). Before
+    /// 1.4: after the image. From 1.4 on: more NVRAM data after the
+    /// app's data, before its install parameters (multiple of the flash
+    /// page: 64 on Nano S, 256 on Nano X, 512 on newer models).
+    #[arg(long, default_value_t = 0)]
+    reserve: u32,
+    /// Bytes actually loaded at the end of the
+    /// reserved area (at most --reserve), zeros unless
+    /// --reserve-pad-pattern is given.
+    #[arg(long, default_value_t = 0)]
+    reserve_pad: u32,
+    /// Hex pattern repeated over the reserve pad (e.g. ff, deadbeef).
+    #[arg(long)]
+    reserve_pad_pattern: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1821,106 +1829,10 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::App { cmd } => match cmd {
-            AppCmd::Load {
-                file,
-                key,
-                no_replace,
-                dry_run,
-                sign,
-                sign_key,
-                name,
-                app_version,
-                flags,
-                api_level,
-                data_size,
-                install_params_size,
-                legacy_layout,
-                icon,
-                reserve,
-                reserve_pad,
-                reserve_pad_pattern,
-            } => {
-                let reserve_pad_pattern = reserve_pad_pattern
-                    .as_deref()
-                    .map(hex::decode)
-                    .transpose()
-                    .map_err(|e| Error::InvalidInput(format!("--reserve-pad-pattern: {e}")))?;
-                let icon = icon
-                    .as_deref()
-                    .map(hex::decode)
-                    .transpose()
-                    .map_err(|e| Error::InvalidInput(format!("--icon: {e}")))?;
-                let raw = std::fs::read(file)
-                    .map_err(|e| Error::InvalidInput(format!("{}: {e}", file.display())))?;
-                let mut img = if raw.starts_with(b"\x7fELF") {
-                    lsdk::loader::AppImage::from_elf(&raw)?
-                } else {
-                    let name = name.clone().ok_or_else(|| {
-                        Error::InvalidInput("--name is required for HEX files".into())
-                    })?;
-                    lsdk::loader::AppImage::from_ihex(&String::from_utf8_lossy(&raw), &name)?
-                };
-                if let Some(f) = flags {
-                    img.flags = u32::from_str_radix(f.trim_start_matches("0x"), 16)
-                        .map_err(|e| Error::InvalidInput(format!("--flags: {e}")))?;
-                }
-                if api_level.is_some() {
-                    img.api_level = *api_level;
-                }
-                if app_version.is_some() {
-                    img.version = app_version.clone();
-                }
-                if let Some(v) = data_size {
-                    img.data_size = *v;
-                }
-                if let Some(v) = install_params_size {
-                    img.install_params_size = *v;
-                }
-                if *legacy_layout {
-                    img.api_level = None;
-                }
-                eprintln!(
-                    "{} {} (flags 0x{:x}, api {:?}, {} bytes, target {})",
-                    img.name,
-                    img.version.as_deref().unwrap_or(""),
-                    img.flags,
-                    img.api_level,
-                    img.image_size(),
-                    img.target_id
-                        .map(|t| format!("0x{t:08x}"))
-                        .unwrap_or_else(|| "?".into())
-                );
-                if *dry_run {
-                    let icon_or_params = icon
-                        .clone()
-                        .or_else(|| img.install_params_icon())
-                        .unwrap_or_default();
-                    let mut reserved = img.with_default_install_params(Some(&icon_or_params))?;
-                    if *reserve > 0 {
-                        // The device isn't known on a dry run: check the page
-                        // of the image's target (ELF), else none (the install
-                        // checks it against the device).
-                        let page = img
-                            .target_id
-                            .map(lsdk::loader::reserve_page_size)
-                            .unwrap_or(1);
-                        reserved = reserved.with_data_reserve(*reserve, page)?;
-                    }
-                    println!("create_app {}", hex::encode(reserved.create_app_params()?));
-                    println!(
-                        "create_app (pre-1.4) {}",
-                        hex::encode(
-                            img.create_app_params_pre_1_4(
-                                icon.as_deref()
-                                    .unwrap_or(&img.install_params_icon().unwrap_or_default()),
-                                *reserve
-                            )?
-                        )
-                    );
-                    if let Some(t) = img.target_id {
-                        println!("app hash {}", hex::encode(reserved.app_hash(t)?));
-                    }
-                    return Ok(());
+            AppCmd::Load { args, key } => {
+                let img = load_image(args)?;
+                if args.dry_run {
+                    return print_load_dry_run(args, &img);
                 }
                 let root = read_key(&key.clone().unwrap_or_else(default_ca_path)).map_err(|e| {
                     Error::InvalidInput(format!(
@@ -1929,33 +1841,7 @@ async fn run(cli: Cli) -> Result<()> {
                 })?;
                 let d = open(&cli)?;
                 let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
-                let signer = match (sign_key, sign) {
-                    (Some(p), _) => Some(read_key(p)?),
-                    (None, true) => Some(root.clone()),
-                    (None, false) => None,
-                };
-                let opts = lsdk::loader::InstallOptions {
-                    replace: !no_replace,
-                    signer: signer.as_ref(),
-                    icon: icon.as_deref(),
-                    reserve: *reserve,
-                    reserve_pad: *reserve_pad,
-                    reserve_pad_pattern: reserve_pad_pattern.as_deref(),
-                };
-                lsdk::loader::install_app_with(&mut chan, &img, &opts, &mut |sent, total| {
-                    eprint!("\r> loading {sent}/{total}");
-                    if sent == total {
-                        eprintln!();
-                    }
-                })
-                .await
-                .map_err(|e| match e {
-                    Error::Status(sw) if sw.0 == 0x6512 && !*legacy_layout => Error::App(format!(
-                        "{e}: CREATE APP has the wrong layout for this firmware; if it predates API levels (e.g. Nano S Plus 1.0.x), retry with --legacy-layout"
-                    )),
-                    e => e,
-                })?;
-                println!("installed {}", img.name);
+                install_loaded(&mut chan, args, &img, &root).await?;
             }
             AppCmd::Delete { name, hash, key } => {
                 let d = open(&cli)?;
@@ -2003,7 +1889,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let mut chan =
                 lsdk::scp::SecureChannel::open_mode(&d, &root, mode, &mut scp_progress).await?;
-            scp_console(&mut chan).await?;
+            scp_console(&mut chan, &root).await?;
         }
         Cmd::Screensaver { cmd } => {
             use lsdk::os::{ScreenSaverAnimation, ScreenSaverSpeed};
@@ -2673,25 +2559,258 @@ fn scp_progress(ev: lsdk::scp::ScpEvent) {
     }
 }
 
-const CONSOLE_HELP: &str = "\
-secure channel commands:
-  version                 firmware version (through the channel)
-  meminfo                 memory usage
-  apps                    installed apps
-  delete NAME             delete an app (confirmed on the device)
-  delete-hash HASH        delete an app by its full hash (hex)
-  delete-all              delete every app (confirmed on the device)
-  hash ADDR LEN           firmware hash (hex address / length; vendor HSM only)
-  reset-ca                remove the custom CA (confirmed on the device)
-  reset-endorsement       erase the endorsement keys (confirmed on the device)
-  INS [DATA]              raw secure command, hex (e.g. `10`, `0c 04414243`)
-  apdu HEX                plain APDU outside the channel (CLA INS P1 P2 Lc DATA)
-  help                    this text
-  quit                    close the console (also exit, Ctrl-D)";
+fn opt_hex(v: &Option<String>, what: &str) -> Result<Option<Vec<u8>>> {
+    v.as_deref()
+        .map(hex::decode)
+        .transpose()
+        .map_err(|e| Error::InvalidInput(format!("{what}: {e}")))
+}
+
+/// Read an app image (ELF or Intel HEX) and apply the `LoadArgs` overrides.
+fn load_image(a: &LoadArgs) -> Result<lsdk::loader::AppImage> {
+    let raw = std::fs::read(&a.file)
+        .map_err(|e| Error::InvalidInput(format!("{}: {e}", a.file.display())))?;
+    let mut img = if raw.starts_with(b"\x7fELF") {
+        lsdk::loader::AppImage::from_elf(&raw)?
+    } else {
+        let name = a
+            .name
+            .clone()
+            .ok_or_else(|| Error::InvalidInput("--name is required for HEX files".into()))?;
+        lsdk::loader::AppImage::from_ihex(&String::from_utf8_lossy(&raw), &name)?
+    };
+    if let Some(f) = &a.flags {
+        img.flags = u32::from_str_radix(f.trim_start_matches("0x"), 16)
+            .map_err(|e| Error::InvalidInput(format!("--flags: {e}")))?;
+    }
+    if a.api_level.is_some() {
+        img.api_level = a.api_level;
+    }
+    if a.app_version.is_some() {
+        img.version = a.app_version.clone();
+    }
+    if let Some(v) = a.data_size {
+        img.data_size = v;
+    }
+    if let Some(v) = a.install_params_size {
+        img.install_params_size = v;
+    }
+    if a.legacy_layout {
+        img.api_level = None;
+    }
+    eprintln!(
+        "{} {} (flags 0x{:x}, api {:?}, {} bytes, target {})",
+        img.name,
+        img.version.as_deref().unwrap_or(""),
+        img.flags,
+        img.api_level,
+        img.image_size(),
+        img.target_id
+            .map(|t| format!("0x{t:08x}"))
+            .unwrap_or_else(|| "?".into())
+    );
+    Ok(img)
+}
+
+/// `--dry-run`: what CREATE APP would carry, and the app hash.
+fn print_load_dry_run(a: &LoadArgs, img: &lsdk::loader::AppImage) -> Result<()> {
+    let icon = opt_hex(&a.icon, "--icon")?
+        .or_else(|| img.install_params_icon())
+        .unwrap_or_default();
+    let mut reserved = img.with_default_install_params(Some(&icon))?;
+    if a.reserve > 0 {
+        // The device isn't known on a dry run: check the page of the image's
+        // target (ELF), else none (the install checks it against the device).
+        let page = img
+            .target_id
+            .map(lsdk::loader::reserve_page_size)
+            .unwrap_or(1);
+        reserved = reserved.with_data_reserve(a.reserve, page)?;
+    }
+    println!("create_app {}", hex::encode(reserved.create_app_params()?));
+    println!(
+        "create_app (pre-1.4) {}",
+        hex::encode(img.create_app_params_pre_1_4(&icon, a.reserve)?)
+    );
+    if let Some(t) = img.target_id {
+        println!("app hash {}", hex::encode(reserved.app_hash(t)?));
+    }
+    Ok(())
+}
+
+/// Install `img` over an open channel; `--sign` signs with `root`.
+async fn install_loaded(
+    chan: &mut lsdk::scp::SecureChannel<'_, Link>,
+    a: &LoadArgs,
+    img: &lsdk::loader::AppImage,
+    root: &lsdk::scp::RootKey,
+) -> Result<()> {
+    let icon = opt_hex(&a.icon, "--icon")?;
+    let pattern = opt_hex(&a.reserve_pad_pattern, "--reserve-pad-pattern")?;
+    let signer = match (&a.sign_key, a.sign) {
+        (Some(p), _) => Some(read_key(p)?),
+        (None, true) => Some(root.clone()),
+        (None, false) => None,
+    };
+    let opts = lsdk::loader::InstallOptions {
+        replace: !a.no_replace,
+        signer: signer.as_ref(),
+        icon: icon.as_deref(),
+        reserve: a.reserve,
+        reserve_pad: a.reserve_pad,
+        reserve_pad_pattern: pattern.as_deref(),
+    };
+    lsdk::loader::install_app_with(chan, img, &opts, &mut |sent, total| {
+        eprint!("\r> loading {sent}/{total}");
+        if sent == total {
+            eprintln!();
+        }
+    })
+    .await
+    .map_err(|e| match e {
+        Error::Status(sw) if sw.0 == 0x6512 && !a.legacy_layout => Error::App(format!(
+            "{e}: CREATE APP has the wrong layout for this firmware; if it predates API levels (e.g. Nano S Plus 1.0.x), retry with --legacy-layout"
+        )),
+        e => e,
+    })?;
+    println!("installed {}", img.name);
+    Ok(())
+}
+
+/// One console line (`lsdk console`).
+#[derive(Parser)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    override_usage = "COMMAND [ARGS]   (or a raw secure command in hex: INS [DATA])",
+    after_help = "A line made only of hex is a raw secure command: its first byte is the \
+secure INS, the rest its data (e.g. `10`, `0c 04414243`); the decrypted answer is printed. \
+`help COMMAND` shows a command's options."
+)]
+struct ConsoleLine {
+    #[command(subcommand)]
+    cmd: ConsoleCmd,
+}
+
+#[derive(Subcommand)]
+enum ConsoleCmd {
+    /// Firmware version (through the channel).
+    Version,
+    /// Memory usage.
+    Meminfo,
+    /// Installed apps.
+    #[command(alias = "list")]
+    Apps,
+    /// Install an app from its ELF or Intel HEX (same options as `app load`).
+    #[command(alias = "load")]
+    Install(LoadArgs),
+    /// Delete an app (confirmed on the device).
+    Delete { name: String },
+    /// Delete an app by its full hash (hex).
+    DeleteHash { hash: String },
+    /// Delete every app (confirmed on the device).
+    DeleteAll,
+    /// Firmware hash over ADDR..ADDR+LEN (hex; vendor HSM sessions only).
+    Hash { address: String, length: String },
+    /// Remove the custom CA (confirmed on the device).
+    ResetCa,
+    /// Erase the endorsement keys (confirmed on the device).
+    ResetEndorsement,
+    /// Raw secure command: INS and DATA in hex.
+    Send {
+        ins: String,
+        #[arg(num_args = 0.., trailing_var_arg = true)]
+        data: Vec<String>,
+    },
+    /// CREATE APP (0x0b) with raw parameters (hex).
+    CreateApp { params: String },
+    /// SET LOAD OFFSET (0x05): base offset of the next loads (hex).
+    SetLoadOffset { offset: String },
+    /// LOAD (0x06): DATA (hex) at OFFSET (hex) from the load base.
+    LoadChunk { offset: String, data: String },
+    /// FLUSH (0x07) the loaded data to flash.
+    Flush,
+    /// CRC (0x08): check the CRC16 of the LEN bytes loaded from the load base
+    /// (both hex; or --data HEX to compute LEN and CRC from those bytes).
+    Crc {
+        length: Option<String>,
+        crc: Option<String>,
+        #[arg(long, conflicts_with_all = ["length", "crc"])]
+        data: Option<String>,
+    },
+    /// COMMIT (0x09), with optional raw data (hex: signature, entry point...).
+    Commit { data: Option<String> },
+    /// MCU BOOTLOADER (0xb0): restart into the MCU bootloader (older models;
+    /// ends the session).
+    McuBootloader,
+    /// Plain APDU outside the channel (CLA INS P1 P2 Lc DATA, hex).
+    Apdu {
+        #[arg(num_args = 1.., trailing_var_arg = true)]
+        hex: Vec<String>,
+    },
+    /// Close the console (also Ctrl-D).
+    #[command(alias = "exit", alias = "q")]
+    Quit,
+}
+
+/// Split a console line into words: whitespace separated, with '...' and
+/// "..." quoting and backslash escapes.
+fn console_words(line: &str) -> Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quote = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"'), '\\') | (None, '\\') => {
+                cur.extend(chars.next());
+                in_word = true;
+            }
+            (Some(_), c) => cur.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            (None, c) => {
+                cur.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return Err(Error::InvalidInput("unterminated quote".into()));
+    }
+    if in_word {
+        words.push(cur);
+    }
+    Ok(words)
+}
+
+fn console_hex(s: &str) -> Result<Vec<u8>> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    hex::decode(s.trim_start_matches("0x")).map_err(|e| Error::InvalidInput(format!("hex: {e}")))
+}
+
+fn console_u32(s: &str) -> Result<u32> {
+    u32::from_str_radix(s.trim_start_matches("0x"), 16)
+        .map_err(|e| Error::InvalidInput(format!("{s}: {e}")))
+}
 
 /// Interactive loop over an open secure channel: one command per line on
 /// stdin; errors are printed and the console keeps going.
-async fn scp_console(chan: &mut lsdk::scp::SecureChannel<'_, Link>) -> Result<()> {
+async fn scp_console(
+    chan: &mut lsdk::scp::SecureChannel<'_, Link>,
+    root: &lsdk::scp::RootKey,
+) -> Result<()> {
+    use clap::error::ErrorKind;
     use std::io::{BufRead, IsTerminal};
     let tty = std::io::stdin().is_terminal();
     let v = &chan.version;
@@ -2707,22 +2826,49 @@ async fn scp_console(chan: &mut lsdk::scp::SecureChannel<'_, Link>) -> Result<()
             eprint!("scp> ");
             let _ = std::io::stderr().flush();
         }
-        let line = match lines.next() {
-            Some(l) => l.map_err(|e| Error::App(e.to_string()))?,
-            None => {
-                if tty {
-                    eprintln!();
-                }
-                return Ok(());
+        let Some(line) = lines.next() else {
+            if tty {
+                eprintln!();
             }
+            return Ok(());
         };
+        let line = line.map_err(|e| Error::App(e.to_string()))?;
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (cmd, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
-        let rest = rest.trim();
-        match scp_console_cmd(chan, &cmd.to_ascii_lowercase(), rest).await {
+        let words = match console_words(line) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("error: {e}");
+                continue;
+            }
+        };
+        // A line of hex only is a raw secure command.
+        let cmd = if words.iter().all(|w| {
+            let w = w.trim_start_matches("0x");
+            !w.is_empty() && w.chars().all(|c| c.is_ascii_hexdigit())
+        }) {
+            ConsoleCmd::Send {
+                ins: String::new(),
+                data: words,
+            }
+        } else {
+            match ConsoleLine::try_parse_from(&words) {
+                Ok(l) => l.cmd,
+                Err(e)
+                    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) =>
+                {
+                    print!("{e}");
+                    continue;
+                }
+                Err(e) => {
+                    eprint!("{e}");
+                    continue;
+                }
+            }
+        };
+        match scp_console_cmd(chan, root, cmd).await {
             Ok(true) => {}
             Ok(false) => return Ok(()),
             Err(e) => eprintln!("error: {e}"),
@@ -2730,95 +2876,129 @@ async fn scp_console(chan: &mut lsdk::scp::SecureChannel<'_, Link>) -> Result<()
     }
 }
 
-fn console_hex(s: &str) -> Result<Vec<u8>> {
-    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    hex::decode(s.trim_start_matches("0x")).map_err(|e| Error::InvalidInput(format!("hex: {e}")))
-}
-
-/// One console command; `Ok(false)` closes the console.
+/// Run one console command; `Ok(false)` closes the console.
 async fn scp_console_cmd(
     chan: &mut lsdk::scp::SecureChannel<'_, Link>,
-    cmd: &str,
-    rest: &str,
+    root: &lsdk::scp::RootKey,
+    cmd: ConsoleCmd,
 ) -> Result<bool> {
-    let no_args = || {
-        if rest.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::InvalidInput(format!("`{cmd}` takes no argument")))
-        }
-    };
+    use lsdk::scp::ins;
+    let confirm = || eprintln!("> confirm on the device");
     match cmd {
-        "quit" | "exit" | "q" => return Ok(false),
-        "help" | "?" => println!("{CONSOLE_HELP}"),
-        "version" => {
-            no_args()?;
-            print(&chan.get_version().await?)
-        }
-        "meminfo" => {
-            no_args()?;
-            print(&chan.get_memory_info().await?)
-        }
-        "apps" | "list" => {
-            no_args()?;
-            print(&chan.list_apps().await?)
-        }
-        "delete" => {
-            if rest.is_empty() {
-                return Err(Error::InvalidInput("usage: delete NAME".into()));
+        ConsoleCmd::Quit => return Ok(false),
+        ConsoleCmd::Version => print(&chan.get_version().await?),
+        ConsoleCmd::Meminfo => print(&chan.get_memory_info().await?),
+        ConsoleCmd::Apps => print(&chan.list_apps().await?),
+        ConsoleCmd::Install(a) => {
+            let img = load_image(&a)?;
+            if a.dry_run {
+                print_load_dry_run(&a, &img)?;
+            } else {
+                install_loaded(chan, &a, &img, root).await?;
             }
-            eprintln!("> confirm on the device");
-            chan.delete_app(rest).await?;
-            println!("deleted {rest}");
         }
-        "delete-hash" => {
-            let h: [u8; 32] = console_hex(rest)?
+        ConsoleCmd::Delete { name } => {
+            confirm();
+            chan.delete_app(&name).await?;
+            println!("deleted {name}");
+        }
+        ConsoleCmd::DeleteHash { hash } => {
+            let h: [u8; 32] = console_hex(&hash)?
                 .try_into()
                 .map_err(|_| Error::InvalidInput("hash must be 32 bytes".into()))?;
-            eprintln!("> confirm on the device");
+            confirm();
             chan.delete_app_by_hash(&h).await?;
             println!("deleted");
         }
-        "delete-all" => {
-            no_args()?;
+        ConsoleCmd::DeleteAll => {
             eprintln!("> confirm deleting all apps on the device");
             chan.delete_all_apps().await?;
             println!("all apps deleted");
         }
-        "hash" => {
-            let num = |s: Option<&str>| {
-                s.and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                    .ok_or_else(|| Error::InvalidInput("usage: hash ADDR LEN (hex)".into()))
-            };
-            let mut it = rest.split_whitespace();
-            let (a, l) = (num(it.next())?, num(it.next())?);
+        ConsoleCmd::Hash { address, length } => {
+            let (a, l) = (console_u32(&address)?, console_u32(&length)?);
             println!("{}", hex::encode(chan.hash_firmware(a, l).await?));
         }
-        "reset-ca" => {
-            no_args()?;
-            eprintln!("> confirm on the device");
+        ConsoleCmd::ResetCa => {
+            confirm();
             chan.reset_custom_ca().await.map_err(ca_hint)?;
             println!("custom CA removed");
         }
-        "reset-endorsement" => {
-            no_args()?;
-            eprintln!("> confirm on the device");
+        ConsoleCmd::ResetEndorsement => {
+            confirm();
             chan.reset_endorsement().await?;
             println!("endorsement keys erased");
         }
-        "apdu" => {
-            let raw = console_hex(rest)?;
-            println!("{}", hex::encode(chan.device().exchange_raw(&raw).await?));
-        }
-        _ => {
-            // Raw secure command: INS then data, all hex.
-            let raw = console_hex(&format!("{cmd}{rest}")).map_err(|_| {
-                Error::InvalidInput(format!("unknown command `{cmd}` (type `help`)"))
-            })?;
+        ConsoleCmd::Send { ins, data } => {
+            let raw = console_hex(&format!("{ins}{}", data.concat()))?;
             let Some((&ins, data)) = raw.split_first() else {
-                return Ok(true);
+                return Err(Error::InvalidInput("missing INS".into()));
             };
             println!("{}", hex::encode(chan.exchange(ins, data).await?));
+        }
+        ConsoleCmd::CreateApp { params } => {
+            let r = chan
+                .exchange(ins::CREATE_APP, &console_hex(&params)?)
+                .await?;
+            println!("ok {}", hex::encode(r));
+        }
+        ConsoleCmd::SetLoadOffset { offset } => {
+            let o = console_u32(&offset)?;
+            chan.exchange(ins::SET_LOAD_OFFSET, &o.to_be_bytes())
+                .await?;
+            println!("ok");
+        }
+        ConsoleCmd::LoadChunk { offset, data } => {
+            let o = u16::try_from(console_u32(&offset)?)
+                .map_err(|_| Error::InvalidInput("LOAD offset is 16 bits".into()))?;
+            let mut d = o.to_be_bytes().to_vec();
+            d.extend(console_hex(&data)?);
+            chan.exchange(ins::LOAD, &d).await?;
+            println!("ok");
+        }
+        ConsoleCmd::Flush => {
+            chan.exchange(ins::FLUSH, &[]).await?;
+            println!("ok");
+        }
+        ConsoleCmd::Crc { length, crc, data } => {
+            let (len, crc) = match (data, length, crc) {
+                (Some(d), _, _) => {
+                    let d = console_hex(&d)?;
+                    (d.len() as u32, lsdk::loader::crc16(&d))
+                }
+                (None, Some(l), Some(c)) => (
+                    console_u32(&l)?,
+                    u16::try_from(console_u32(&c)?)
+                        .map_err(|_| Error::InvalidInput("CRC is 16 bits".into()))?,
+                ),
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "usage: crc LEN CRC, or crc --data HEX".into(),
+                    ));
+                }
+            };
+            let mut d = vec![0, 0];
+            d.extend_from_slice(&len.to_be_bytes());
+            d.extend_from_slice(&crc.to_be_bytes());
+            chan.exchange(ins::CRC, &d).await?;
+            println!("ok (length {len:x}, crc {crc:04x})");
+        }
+        ConsoleCmd::Commit { data } => {
+            let d = data
+                .as_deref()
+                .map(console_hex)
+                .transpose()?
+                .unwrap_or_default();
+            let r = chan.exchange(ins::COMMIT, &d).await?;
+            println!("ok {}", hex::encode(r));
+        }
+        ConsoleCmd::McuBootloader => {
+            let r = chan.exchange(ins::MCU_BOOTLOADER, &[]).await?;
+            println!("ok {}", hex::encode(r));
+        }
+        ConsoleCmd::Apdu { hex } => {
+            let raw = console_hex(&hex.concat())?;
+            println!("{}", hex::encode(chan.device().exchange_raw(&raw).await?));
         }
     }
     Ok(true)
@@ -2846,5 +3026,39 @@ fn main() {
     if let Err(e) = rt.block_on(run(cli)) {
         eprintln!("error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn console_parsing() {
+        ConsoleLine::command().debug_assert();
+        Cli::command().debug_assert();
+        assert_eq!(
+            console_words(r#"delete "My App" a\ b 'x y'"#).unwrap(),
+            ["delete", "My App", "a b", "x y"]
+        );
+        assert!(console_words("delete \"oops").is_err());
+        let p = |l: &str| ConsoleLine::try_parse_from(console_words(l).unwrap()).map(|l| l.cmd);
+        assert!(
+            matches!(p("delete 'My App'"), Ok(ConsoleCmd::Delete { name }) if name == "My App")
+        );
+        assert!(matches!(
+            p("install app.elf --sign --reserve 512"),
+            Ok(ConsoleCmd::Install(a)) if a.sign && a.reserve == 512
+        ));
+        assert!(
+            matches!(p("send 0c 04 41"), Ok(ConsoleCmd::Send { ins, data }) if ins == "0c" && data.len() == 2)
+        );
+        assert!(matches!(
+            p("crc --data 0102"),
+            Ok(ConsoleCmd::Crc { data: Some(_), .. })
+        ));
+        assert!(matches!(p("exit"), Ok(ConsoleCmd::Quit)));
+        assert!(p("bogus").is_err());
     }
 }

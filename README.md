@@ -177,7 +177,7 @@ lsdk ca install --name "dev"             # once, with the device in recovery mod
 lsdk ca install --name "dev" --regular   # firmware older than Ledger Recover (answers 0x650e)
 lsdk app load build/nanos2/bin/app.elf   # after every build (replaces the previous one)
 lsdk app list | lsdk app delete "My App" | lsdk meminfo
-lsdk console                             # interactive secure channel (apps, meminfo, raw INS hex...)
+lsdk console                             # interactive secure channel: install, apps, load primitives, raw INS (`help`)
 ```
 
 `app load` reads everything from the ELF built by the C or Rust SDK (name,
