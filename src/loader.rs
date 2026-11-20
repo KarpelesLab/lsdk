@@ -352,6 +352,54 @@ impl AppImage {
         Ok(d)
     }
 
+    /// Firmware 1.4 and later: the image with `reserve` more bytes of NVRAM
+    /// data after its data, the install parameters moved after them (code,
+    /// data and install parameters each start on a 64-byte page, per the
+    /// SDK linker script). The reserved bytes are not part of any area, so
+    /// they are not loaded. `reserve` must be a multiple of 64.
+    pub fn with_data_reserve(&self, reserve: u32) -> Result<AppImage> {
+        if !reserve.is_multiple_of(64) {
+            return Err(Error::InvalidInput(format!(
+                "reserve must be a multiple of 64 (flash page) on firmware 1.4 and later, e.g. {}",
+                reserve.div_ceil(64) * 64
+            )));
+        }
+        let ip_start = self.min_address() + self.image_size() - self.install_params_size;
+        let shift = |a: u32| {
+            a.checked_add(reserve)
+                .ok_or_else(|| Error::InvalidInput("reserve too large".into()))
+        };
+        let mut areas = Vec::new();
+        for a in &self.areas {
+            let end = a.address + a.data.len() as u32;
+            if end <= ip_start {
+                areas.push(a.clone());
+            } else if a.address >= ip_start {
+                areas.push(Area {
+                    address: shift(a.address)?,
+                    data: a.data.clone(),
+                });
+            } else {
+                let k = (ip_start - a.address) as usize;
+                areas.push(Area {
+                    address: a.address,
+                    data: a.data[..k].to_vec(),
+                });
+                areas.push(Area {
+                    address: shift(ip_start)?,
+                    data: a.data[k..].to_vec(),
+                });
+            }
+        }
+        let mut img = self.clone();
+        img.areas = areas;
+        img.data_size = self
+            .data_size
+            .checked_add(reserve)
+            .ok_or_else(|| Error::InvalidInput("reserve too large".into()))?;
+        Ok(img)
+    }
+
     /// The image without its install parameters block.
     fn without_install_params(&self) -> AppImage {
         let mut img = self.clone();
@@ -427,10 +475,13 @@ pub struct InstallOptions<'a> {
     /// Icon for firmware before 1.4 (bitmap as `icon.py hexbitmaponly`);
     /// defaults to the icon of the install parameters.
     pub icon: Option<&'a [u8]>,
-    /// Firmware before 1.4: extra bytes declared in `CREATE_APP` after the
-    /// image, not loaded (experimental: contents are whatever the device
-    /// leaves there). Without `reserve_pad`, a bare `SET_LOAD_OFFSET` to its
-    /// last byte is sent after the image.
+    /// Extra bytes declared in `CREATE_APP` but not loaded (experimental:
+    /// contents are whatever the device leaves there). Before 1.4 they are
+    /// added to the single length, after the image; from 1.4 on to the data
+    /// length (a multiple of 64), before the install parameters (see
+    /// [`AppImage::with_data_reserve`]). Without `reserve_pad`, a bare
+    /// `SET_LOAD_OFFSET` to the reserved area's last byte is sent after the
+    /// image.
     pub reserve: u32,
     /// Bytes actually loaded at the end of the reserved area
     /// (at most `reserve`).
@@ -487,22 +538,30 @@ pub async fn install_app_with<T: Transport>(
         Some(i) => i.to_vec(),
         None => image.install_params_icon().unwrap_or_default(),
     };
+    let create_params;
     let image = if pre_1_4 {
-        chan.exchange(
-            ins::CREATE_APP,
-            &image.create_app_params_pre_1_4(&icon, opts.reserve)?,
-        )
-        .await?;
+        create_params = image.create_app_params_pre_1_4(&icon, opts.reserve)?;
         stripped = image.without_install_params();
         &stripped
+    } else if opts.reserve > 0 {
+        stripped = image.with_data_reserve(opts.reserve)?;
+        create_params = stripped.create_app_params()?;
+        &stripped
     } else {
-        chan.exchange(ins::CREATE_APP, &image.create_app_params()?)
-            .await?;
+        create_params = image.create_app_params()?;
         image
     };
+    chan.exchange(ins::CREATE_APP, &create_params).await?;
     let min = image.min_address();
+    // Offset just past the reserved area: the end of the image before 1.4,
+    // the start of the install parameters after.
+    let reserve_end = if pre_1_4 {
+        image.image_size() + opts.reserve
+    } else {
+        image.image_size() - image.install_params_size
+    };
     let mut areas = image.areas.clone();
-    if pre_1_4 && opts.reserve_pad > 0 {
+    if opts.reserve > 0 && opts.reserve_pad > 0 {
         if opts.reserve_pad > opts.reserve {
             return Err(Error::InvalidInput(
                 "reserve pad larger than reserve".into(),
@@ -515,7 +574,7 @@ pub async fn install_app_with<T: Transport>(
             return Err(Error::InvalidInput("empty reserve pad pattern".into()));
         }
         areas.push(Area {
-            address: min + image.image_size() + opts.reserve - opts.reserve_pad,
+            address: min + reserve_end - opts.reserve_pad,
             data: pattern
                 .iter()
                 .copied()
@@ -523,6 +582,7 @@ pub async fn install_app_with<T: Transport>(
                 .take(opts.reserve_pad as usize)
                 .collect(),
         });
+        areas.sort_by_key(|a| a.address);
     }
     let total: usize = areas.iter().map(|a| a.data.len()).sum();
     let mut sent = 0;
@@ -545,10 +605,10 @@ pub async fn install_app_with<T: Transport>(
             chan.exchange(ins::CRC, &crc).await?;
         }
     }
-    if pre_1_4 && opts.reserve > 0 && opts.reserve_pad == 0 {
+    if opts.reserve > 0 && opts.reserve_pad == 0 {
         // Experimental: point the load offset at the last byte of the
         // reserved area, without loading anything there.
-        let last = image.image_size() + opts.reserve - 1;
+        let last = reserve_end - 1;
         chan.exchange(ins::SET_LOAD_OFFSET, &last.to_be_bytes())
             .await?;
     }
@@ -569,7 +629,19 @@ pub async fn install_app_with<T: Transport>(
             d
         }
         (false, Some(key)) => {
-            let sig = key.sign_digest(&image.app_hash(chan.version.target_id)?)?;
+            let hash = if opts.reserve > 0 {
+                // The reserved area is never loaded: hash what was, in
+                // order (ledgerblue hashes the loaded chunks the same way).
+                let mut d = chan.version.target_id.to_be_bytes().to_vec();
+                d.extend_from_slice(&create_params);
+                for a in &areas {
+                    d.extend_from_slice(&a.data);
+                }
+                purecrypto::hash::sha256(&d)
+            } else {
+                image.app_hash(chan.version.target_id)?
+            };
+            let sig = key.sign_digest(&hash)?;
             let mut d = vec![sig.len() as u8];
             d.extend(sig);
             d
@@ -587,6 +659,30 @@ mod tests {
     #[test]
     fn crc() {
         assert_eq!(crc16(b"123456789"), 0x29b1); // CRC-16/CCITT-FALSE check value
+    }
+
+    #[test]
+    fn data_reserve() {
+        // 128 bytes code, 64 bytes data, 16 bytes install params.
+        let mut img = AppImage::from_ihex(":00000001FF\n", "x").unwrap();
+        img.areas = vec![Area {
+            address: 0x1000,
+            data: (0..208u32).map(|i| i as u8).collect(),
+        }];
+        img.entry = 0x1000;
+        img.data_size = 64;
+        img.install_params_size = 16;
+        assert!(img.with_data_reserve(100).is_err());
+        let r = img.with_data_reserve(256).unwrap();
+        assert_eq!(r.code_length().unwrap(), 128);
+        assert_eq!(r.data_size, 64 + 256);
+        assert_eq!(r.image_size(), 208 + 256);
+        assert_eq!(r.areas.len(), 2);
+        assert_eq!(r.areas[0].address, 0x1000);
+        assert_eq!(r.areas[0].data.len(), 192);
+        assert_eq!(r.areas[1].address, 0x1000 + 192 + 256);
+        assert_eq!(r.areas[1].data[0], 192);
+        assert_eq!(r.install_params(), img.install_params());
     }
 
     #[test]

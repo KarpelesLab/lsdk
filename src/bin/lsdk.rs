@@ -460,11 +460,12 @@ enum AppCmd {
         /// install parameters, if any.
         #[arg(long)]
         icon: Option<String>,
-        /// Firmware before 1.4: extra bytes declared after the image
-        /// without loading them (experimental).
+        /// Extra bytes declared without loading them (experimental). Before
+        /// 1.4: after the image. From 1.4 on: more NVRAM data after the
+        /// app's data, before its install parameters (multiple of 64).
         #[arg(long, default_value_t = 0)]
         reserve: u32,
-        /// Firmware before 1.4: bytes actually loaded at the end of the
+        /// Bytes actually loaded at the end of the
         /// reserved area (at most --reserve), zeros unless
         /// --reserve-pad-pattern is given.
         #[arg(long, default_value_t = 0)]
@@ -1872,7 +1873,12 @@ async fn run(cli: Cli) -> Result<()> {
                         .unwrap_or_else(|| "?".into())
                 );
                 if *dry_run {
-                    println!("create_app {}", hex::encode(img.create_app_params()?));
+                    let reserved = if *reserve > 0 {
+                        img.with_data_reserve(*reserve)?
+                    } else {
+                        img.clone()
+                    };
+                    println!("create_app {}", hex::encode(reserved.create_app_params()?));
                     println!(
                         "create_app (pre-1.4) {}",
                         hex::encode(
