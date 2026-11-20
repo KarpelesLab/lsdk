@@ -154,6 +154,16 @@ enum Cmd {
         #[arg(long)]
         key: Option<std::path::PathBuf>,
     },
+    /// Interactive console over the secure channel (type `help` at the prompt).
+    /// Reads commands from stdin, so it can also be scripted.
+    Console {
+        /// Root key file (defaults to the CA key if present, else a random key).
+        #[arg(long)]
+        key: Option<std::path::PathBuf>,
+        /// Open the Recover channel (AES-SIV, recovery mode) instead of the regular one.
+        #[arg(long)]
+        recover: bool,
+    },
     /// Custom screensaver (Nano X / Nano S Plus, recovery mode only).
     Screensaver {
         #[command(subcommand)]
@@ -1983,6 +1993,18 @@ async fn run(cli: Cli) -> Result<()> {
             let mut chan = lsdk::scp::SecureChannel::open(&d, &root, &mut scp_progress).await?;
             print(&chan.get_memory_info().await?);
         }
+        Cmd::Console { key, recover } => {
+            let d = open(&cli)?;
+            let root = root_key(key.as_ref())?;
+            let mode = if *recover {
+                lsdk::scp::ScpMode::Recover
+            } else {
+                lsdk::scp::ScpMode::Default
+            };
+            let mut chan =
+                lsdk::scp::SecureChannel::open_mode(&d, &root, mode, &mut scp_progress).await?;
+            scp_console(&mut chan).await?;
+        }
         Cmd::Screensaver { cmd } => {
             use lsdk::os::{ScreenSaverAnimation, ScreenSaverSpeed};
             let d = open(&cli)?;
@@ -2649,6 +2671,157 @@ fn scp_progress(ev: lsdk::scp::ScpEvent) {
         lsdk::scp::ScpEvent::PermissionGranted => eprintln!("> allowed"),
         lsdk::scp::ScpEvent::Opened => {}
     }
+}
+
+const CONSOLE_HELP: &str = "\
+secure channel commands:
+  version                 firmware version (through the channel)
+  meminfo                 memory usage
+  apps                    installed apps
+  delete NAME             delete an app (confirmed on the device)
+  delete-hash HASH        delete an app by its full hash (hex)
+  delete-all              delete every app (confirmed on the device)
+  hash ADDR LEN           firmware hash (hex address / length; vendor HSM only)
+  reset-ca                remove the custom CA (confirmed on the device)
+  reset-endorsement       erase the endorsement keys (confirmed on the device)
+  INS [DATA]              raw secure command, hex (e.g. `10`, `0c 04414243`)
+  apdu HEX                plain APDU outside the channel (CLA INS P1 P2 Lc DATA)
+  help                    this text
+  quit                    close the console (also exit, Ctrl-D)";
+
+/// Interactive loop over an open secure channel: one command per line on
+/// stdin; errors are printed and the console keeps going.
+async fn scp_console(chan: &mut lsdk::scp::SecureChannel<'_, Link>) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    let tty = std::io::stdin().is_terminal();
+    let v = &chan.version;
+    eprintln!(
+        "secure channel open ({:?}, firmware {}, target {:08x}); type `help`",
+        chan.mode(),
+        v.se_version,
+        v.target_id
+    );
+    let mut lines = std::io::stdin().lock().lines();
+    loop {
+        if tty {
+            eprint!("scp> ");
+            let _ = std::io::stderr().flush();
+        }
+        let line = match lines.next() {
+            Some(l) => l.map_err(|e| Error::App(e.to_string()))?,
+            None => {
+                if tty {
+                    eprintln!();
+                }
+                return Ok(());
+            }
+        };
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (cmd, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let rest = rest.trim();
+        match scp_console_cmd(chan, &cmd.to_ascii_lowercase(), rest).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+}
+
+fn console_hex(s: &str) -> Result<Vec<u8>> {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    hex::decode(s.trim_start_matches("0x")).map_err(|e| Error::InvalidInput(format!("hex: {e}")))
+}
+
+/// One console command; `Ok(false)` closes the console.
+async fn scp_console_cmd(
+    chan: &mut lsdk::scp::SecureChannel<'_, Link>,
+    cmd: &str,
+    rest: &str,
+) -> Result<bool> {
+    let no_args = || {
+        if rest.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput(format!("`{cmd}` takes no argument")))
+        }
+    };
+    match cmd {
+        "quit" | "exit" | "q" => return Ok(false),
+        "help" | "?" => println!("{CONSOLE_HELP}"),
+        "version" => {
+            no_args()?;
+            print(&chan.get_version().await?)
+        }
+        "meminfo" => {
+            no_args()?;
+            print(&chan.get_memory_info().await?)
+        }
+        "apps" | "list" => {
+            no_args()?;
+            print(&chan.list_apps().await?)
+        }
+        "delete" => {
+            if rest.is_empty() {
+                return Err(Error::InvalidInput("usage: delete NAME".into()));
+            }
+            eprintln!("> confirm on the device");
+            chan.delete_app(rest).await?;
+            println!("deleted {rest}");
+        }
+        "delete-hash" => {
+            let h: [u8; 32] = console_hex(rest)?
+                .try_into()
+                .map_err(|_| Error::InvalidInput("hash must be 32 bytes".into()))?;
+            eprintln!("> confirm on the device");
+            chan.delete_app_by_hash(&h).await?;
+            println!("deleted");
+        }
+        "delete-all" => {
+            no_args()?;
+            eprintln!("> confirm deleting all apps on the device");
+            chan.delete_all_apps().await?;
+            println!("all apps deleted");
+        }
+        "hash" => {
+            let num = |s: Option<&str>| {
+                s.and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                    .ok_or_else(|| Error::InvalidInput("usage: hash ADDR LEN (hex)".into()))
+            };
+            let mut it = rest.split_whitespace();
+            let (a, l) = (num(it.next())?, num(it.next())?);
+            println!("{}", hex::encode(chan.hash_firmware(a, l).await?));
+        }
+        "reset-ca" => {
+            no_args()?;
+            eprintln!("> confirm on the device");
+            chan.reset_custom_ca().await.map_err(ca_hint)?;
+            println!("custom CA removed");
+        }
+        "reset-endorsement" => {
+            no_args()?;
+            eprintln!("> confirm on the device");
+            chan.reset_endorsement().await?;
+            println!("endorsement keys erased");
+        }
+        "apdu" => {
+            let raw = console_hex(rest)?;
+            println!("{}", hex::encode(chan.device().exchange_raw(&raw).await?));
+        }
+        _ => {
+            // Raw secure command: INS then data, all hex.
+            let raw = console_hex(&format!("{cmd}{rest}")).map_err(|_| {
+                Error::InvalidInput(format!("unknown command `{cmd}` (type `help`)"))
+            })?;
+            let Some((&ins, data)) = raw.split_first() else {
+                return Ok(true);
+            };
+            println!("{}", hex::encode(chan.exchange(ins, data).await?));
+        }
+    }
+    Ok(true)
 }
 
 fn ca_hint(e: Error) -> Error {
