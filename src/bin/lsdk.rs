@@ -2722,8 +2722,10 @@ enum ConsoleCmd {
         #[arg(num_args = 0.., trailing_var_arg = true)]
         data: Vec<String>,
     },
-    /// CREATE APP (0x0b) with raw parameters (hex).
-    CreateApp { params: String },
+    /// CREATE APP (0x0b). The layout follows the device: 1.4+ (--code-len,
+    /// --api-level...) or pre-1.4 (--length, --name...). Numbers are decimal,
+    /// or hex with 0x.
+    CreateApp(CreateAppArgs),
     /// SET LOAD OFFSET (0x05): base offset of the next loads (hex).
     SetLoadOffset { offset: String },
     /// LOAD (0x06): DATA (hex) at OFFSET (hex) from the load base.
@@ -2751,6 +2753,132 @@ enum ConsoleCmd {
     /// Close the console (also Ctrl-D).
     #[command(alias = "exit", alias = "q")]
     Quit,
+}
+
+/// Console `create-app` fields.
+#[derive(clap::Args)]
+struct CreateAppArgs {
+    /// App flags (e.g. 0x200).
+    #[arg(long, default_value = "0")]
+    flags: String,
+    /// 1.4+: code length (image size minus data and install parameters).
+    #[arg(long)]
+    code_len: Option<String>,
+    /// 1.4+: NVRAM data size.
+    #[arg(long, default_value = "0")]
+    data_size: String,
+    /// 1.4+: install parameters size.
+    #[arg(long, default_value = "0")]
+    params_size: String,
+    /// 1.4+: entry point offset from the image start (bit 0 is set for you).
+    #[arg(long, default_value = "0")]
+    entry: String,
+    /// 1.4+: API level (required unless --legacy-layout).
+    #[arg(long)]
+    api_level: Option<String>,
+    /// 1.4+: old layout without the API level byte (e.g. Nano S Plus 1.0.x).
+    #[arg(long, conflicts_with = "api_level")]
+    legacy_layout: bool,
+    /// Pre-1.4: total length (code and data, plus any reserve).
+    #[arg(long)]
+    length: Option<String>,
+    /// Pre-1.4: app name.
+    #[arg(long)]
+    name: Option<String>,
+    /// Pre-1.4: dashboard icon bitmap (hex).
+    #[arg(long, default_value = "")]
+    icon: String,
+    /// Pre-1.4: derivation restriction (hex; ff = any curve, no path).
+    #[arg(long, default_value = "ff")]
+    derivation: String,
+    /// Send this payload (hex) as is instead of building it.
+    #[arg(long, conflicts_with_all = [
+        "code_len", "api_level", "legacy_layout", "length", "name",
+    ])]
+    raw: Option<String>,
+}
+
+/// A number: decimal, or hex with a 0x prefix.
+fn console_num(s: &str, what: &str) -> Result<u32> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u32::from_str_radix(h, 16),
+        None => s.parse(),
+    }
+    .map_err(|e| Error::InvalidInput(format!("{what} {s}: {e}")))
+}
+
+/// Build the CREATE APP payload for the device's layout.
+fn create_app_payload(a: &CreateAppArgs, pre_1_4: bool) -> Result<Vec<u8>> {
+    if let Some(r) = &a.raw {
+        return console_hex(r);
+    }
+    let flags = console_num(&a.flags, "--flags")?;
+    let wrong = |opt: &str| {
+        Error::InvalidInput(format!(
+            "{opt} is for firmware {} 1.4 (this device is {} 1.4)",
+            if pre_1_4 { "from" } else { "before" },
+            if pre_1_4 { "before" } else { "from" }
+        ))
+    };
+    let mut d = Vec::new();
+    if pre_1_4 {
+        if a.code_len.is_some() {
+            return Err(wrong("--code-len"));
+        }
+        if a.api_level.is_some() || a.legacy_layout {
+            return Err(wrong("--api-level / --legacy-layout"));
+        }
+        let length = a.length.as_deref().ok_or_else(|| {
+            Error::InvalidInput("--length is required (firmware before 1.4)".into())
+        })?;
+        let name = a.name.as_deref().ok_or_else(|| {
+            Error::InvalidInput("--name is required (firmware before 1.4)".into())
+        })?;
+        let icon = console_hex(&a.icon)?;
+        let deriv = console_hex(&a.derivation)?;
+        if name.len() > 255 || icon.len() > 255 || deriv.len() > 255 {
+            return Err(Error::InvalidInput(
+                "name, icon or derivation too long".into(),
+            ));
+        }
+        d.extend_from_slice(&console_num(length, "--length")?.to_be_bytes());
+        d.extend_from_slice(&flags.to_be_bytes());
+        for f in [name.as_bytes(), &icon, &deriv] {
+            d.push(f.len() as u8);
+            d.extend_from_slice(f);
+        }
+    } else {
+        if a.length.is_some() || a.name.is_some() {
+            return Err(wrong("--length / --name"));
+        }
+        let code_len = a
+            .code_len
+            .as_deref()
+            .ok_or_else(|| Error::InvalidInput("--code-len is required".into()))?;
+        match (&a.api_level, a.legacy_layout) {
+            (Some(l), _) => d.push(
+                u8::try_from(console_num(l, "--api-level")?)
+                    .map_err(|_| Error::InvalidInput("--api-level is one byte".into()))?,
+            ),
+            (None, true) => {}
+            (None, false) => {
+                return Err(Error::InvalidInput(
+                    "--api-level is required (or --legacy-layout for firmware without API levels)"
+                        .into(),
+                ));
+            }
+        }
+        for (v, what) in [
+            (code_len, "--code-len"),
+            (a.data_size.as_str(), "--data-size"),
+            (a.params_size.as_str(), "--params-size"),
+            (a.flags.as_str(), "--flags"),
+        ] {
+            d.extend_from_slice(&console_num(v, what)?.to_be_bytes());
+        }
+        d.extend_from_slice(&(console_num(&a.entry, "--entry")? | 1).to_be_bytes());
+    }
+    Ok(d)
 }
 
 /// Split a console line into words: whitespace separated, with '...' and
@@ -2936,10 +3064,10 @@ async fn scp_console_cmd(
             };
             println!("{}", hex::encode(chan.exchange(ins, data).await?));
         }
-        ConsoleCmd::CreateApp { params } => {
-            let r = chan
-                .exchange(ins::CREATE_APP, &console_hex(&params)?)
-                .await?;
+        ConsoleCmd::CreateApp(a) => {
+            let d = create_app_payload(&a, lsdk::scp::is_pre_1_4(chan.version.target_id))?;
+            eprintln!("> create_app {}", hex::encode(&d));
+            let r = chan.exchange(ins::CREATE_APP, &d).await?;
             println!("ok {}", hex::encode(r));
         }
         ConsoleCmd::SetLoadOffset { offset } => {
@@ -3060,5 +3188,53 @@ mod tests {
         ));
         assert!(matches!(p("exit"), Ok(ConsoleCmd::Quit)));
         assert!(p("bogus").is_err());
+
+        // create-app builds what the loader sends for the same app.
+        let img = lsdk::loader::AppImage {
+            name: "Test".into(),
+            version: None,
+            api_level: Some(22),
+            flags: 0x200,
+            target_id: None,
+            data_size: 64,
+            install_params_size: 64,
+            entry: 0xc0de0100,
+            areas: vec![lsdk::loader::Area {
+                address: 0xc0de0000,
+                data: vec![0; 1024],
+            }],
+        };
+        let ca = |l: &str| match p(l) {
+            Ok(ConsoleCmd::CreateApp(a)) => a,
+            _ => panic!("{l}"),
+        };
+        let a = ca(
+            "create-app --api-level 22 --code-len 896 --data-size 0x40 --params-size 64 --flags 0x200 --entry 0x100",
+        );
+        assert_eq!(
+            create_app_payload(&a, false).unwrap(),
+            img.create_app_params().unwrap()
+        );
+        assert!(create_app_payload(&a, true).is_err());
+        let mut legacy = img.clone();
+        legacy.api_level = None;
+        let a = ca(
+            "create-app --legacy-layout --code-len 896 --data-size 64 --params-size 64 --flags 0x200 --entry 256",
+        );
+        assert_eq!(
+            create_app_payload(&a, false).unwrap(),
+            legacy.create_app_params().unwrap()
+        );
+        assert!(create_app_payload(&ca("create-app --code-len 896"), false).is_err());
+        let a = ca("create-app --length 960 --flags 0x200 --name Test --icon 0102");
+        assert_eq!(
+            create_app_payload(&a, true).unwrap(),
+            img.create_app_params_pre_1_4(&[1, 2], 0).unwrap()
+        );
+        assert!(create_app_payload(&a, false).is_err());
+        assert_eq!(
+            create_app_payload(&ca("create-app --raw 0a0b"), false).unwrap(),
+            [10, 11]
+        );
     }
 }
