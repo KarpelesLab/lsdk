@@ -646,52 +646,46 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
     pub async fn list_apps(&mut self) -> Result<Vec<SecureAppEntry>> {
         let mut out = Vec::new();
         let old = matches!(self.session, Session::V2 { .. });
-        // Before 1.4 the list has no end marker, so take the app count from
-        // the memory info and stop there (best effort: the erased-slot checks
-        // below still end the list without it).
-        let expected = if old {
+        // Before 1.4 the list has no end marker, so take the app count (and
+        // slot count) from the memory info and read until that many apps.
+        // Without it, the first erased slot ends the list.
+        let slots = if old {
             self.get_memory_info()
                 .await
                 .ok()
-                .map(|m| m.used_app_slots as usize)
+                .map(|m| (m.used_app_slots as usize, m.total_app_slots as usize))
         } else {
             None
         };
-        if expected == Some(0) {
+        if slots.is_some_and(|(used, _)| used == 0) {
             return Ok(out);
         }
+        let mut seen = 0usize;
         let mut d = self.exchange(ins::LIST_APPS, &[]).await?;
         while !d.is_empty() {
             let mut r = Reader::new(&d);
             if old {
-                // Before 1.4: entries of size(1), name LV, flags(4), hash(32).
-                // The flags are the registry word: `!flags << 16 | flags`
-                // (APPLICATION_FLAG_NEG_MASK). The list has no end marker
-                // (1.3.1): past the last app the device returns erased slots
-                // (all 0xff, failing that check), and asking for more after
-                // that crashes it. Stop at the app count, or failing that at
-                // the first erased slot.
+                // Before 1.4: entries of size(1, counting itself), name LV,
+                // flags(4), hash(32). The flags are the registry word:
+                // `!flags << 16 | flags` (APPLICATION_FLAG_NEG_MASK). The list
+                // has no end marker (1.3.1): it walks every slot, returning
+                // erased ones (all 0xff, failing that check), and asking past
+                // the last slot crashes the device. So stop at the app count,
+                // skipping erased slots on the way, and never go past the slot
+                // count; without the counts, stop at the first erased slot.
                 while !r.is_empty() {
-                    let _entry_size = r.u8()?;
-                    let raw = r.lv()?;
-                    if raw.is_empty() || raw.contains(&0xff) {
-                        return Ok(out);
-                    }
-                    let word = r.u32()?;
-                    if (word >> 16) != (!word & 0xffff) {
-                        return Ok(out);
-                    }
-                    let name = String::from_utf8_lossy(raw).into_owned();
-                    let flags = word & 0xffff;
-                    let hash = hex::encode(r.bytes(32)?);
-                    out.push(SecureAppEntry {
-                        name,
-                        flags,
-                        hash_code_data: String::new(),
-                        hash,
-                    });
-                    if expected.is_some_and(|n| out.len() >= n) {
-                        return Ok(out);
+                    let size = r.u8()? as usize;
+                    let entry = r.bytes(size.saturating_sub(1))?;
+                    seen += 1;
+                    let app = Self::old_entry(entry);
+                    let valid = app.is_some();
+                    out.extend(app);
+                    match slots {
+                        Some((used, total)) if out.len() >= used || seen >= total => {
+                            return Ok(out);
+                        }
+                        None if !valid => return Ok(out),
+                        _ => {}
                     }
                 }
                 d = self.exchange(ins::LIST_APPS_CONTINUE, &[]).await?;
@@ -716,6 +710,23 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             d = self.exchange(ins::LIST_APPS_CONTINUE, &[]).await?;
         }
         Ok(out)
+    }
+
+    /// One pre-1.4 list entry (after its size byte), `None` for an erased
+    /// slot or anything that doesn't parse as an app.
+    fn old_entry(entry: &[u8]) -> Option<SecureAppEntry> {
+        let mut e = Reader::new(entry);
+        let raw = e.lv().ok()?;
+        let word = e.u32().ok()?;
+        if raw.is_empty() || raw.contains(&0xff) || (word >> 16) != (!word & 0xffff) {
+            return None;
+        }
+        Some(SecureAppEntry {
+            name: String::from_utf8_lossy(raw).into_owned(),
+            flags: word & 0xffff,
+            hash_code_data: String::new(),
+            hash: hex::encode(e.bytes(32).ok()?),
+        })
     }
 
     /// Delete an app by name.
@@ -822,6 +833,26 @@ mod tests {
         assert_eq!(
             hex::encode(out),
             "85632d07c6e8f37f950acd320a2ecc9340c02b9690c4dc04daef7f6afe5c"
+        );
+    }
+
+    #[test]
+    fn old_list_entry() {
+        // Nano S 1.3.1 pages: one app, then an erased slot.
+        let app = hex::decode("300a466c617368205363616e780b87f450da980d1c4bb4b4292facea596e747a9aec5324a1418c1ef0a002e41346192c").unwrap();
+        let e = SecureChannel::<crate::transport::tcp::TcpTransport>::old_entry(&app[1..]).unwrap();
+        assert_eq!(e.name, "Flash Scan");
+        assert_eq!(e.flags, 0x87f4);
+        assert_eq!(&e.hash[..8], "50da980d");
+        let mut erased = vec![0xb6, 0x90];
+        erased.resize(0xb6, 0xff);
+        assert!(
+            SecureChannel::<crate::transport::tcp::TcpTransport>::old_entry(&erased[1..]).is_none()
+        );
+        // A name running past the entry is not an app either.
+        assert!(
+            SecureChannel::<crate::transport::tcp::TcpTransport>::old_entry(&[0x40, b'a'])
+                .is_none()
         );
     }
 
