@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/KarpelesLab/lsdk/compare/v0.1.1...v0.2.0) - 2026-11-21
+
+### Other
+
+- offline genuine check authenticates with a caller root key (CLI uses the CA key when present, --key; web uses the saved CA key) and checks against a caller issuer list (known_issuers(); --no-default-issuer to trust only --issuer-key, which also takes a file); RootKey moves to attestation, re-exported from scp
+- show the expected OSU hash to compare with the device screen
+- console create-app takes named fields (1.4+: --code-len, --data-size, --params-size, --flags, --entry, --api-level / --legacy-layout; pre-1.4: --length, --name, --icon, --derivation), layout from the device, --raw for a hand-built payload
+- console gets install (app load options, shared), load primitives (create-app, set-load-offset, load-chunk, flush, crc, commit), mcu-bootloader, send; clap-parsed lines with quoting
+- lsdk console, interactive secure channel console (named commands, raw INS hex, plain apdu; --recover, --key; scriptable from stdin)
+- --reserve on modern models, aligned on the device's flash page (Nano S 64, Nano X 256, others 512)
+- 1.4+ builds the install parameters TLV (name, version, icon, path ff) for images without them (HEX); --app-version; signed reserve hash zero-fills like hashApp
+- --reserve on firmware 1.4+ (data length += reserve, install params moved after it; pad / bare SET_LOAD_OFFSET at its end)
+- firmware update: already in the OS updater with no MCU flash, install the final firmware on the open connection
+- firmware update/repair: reopen the device between steps the same way as open() (honours --tcp, --device, --usbfs)
+- firmware update: print the plan and each device state seen while waiting between steps
+- firmware paths: list the update paths from the installed firmware (OSU/final script names, hashes, sizes, MCUs; --depth, --all-providers, --json)
+- --osu <name> picks the OS updater (check/update), refused unless it updates from the current firmware
+- log the internal name of what is installed (app/OSU/final firmware path, MCU/bootloader version)
+- report bulk data bytes in progress (CLI and web log)
+- --reserve-pad-pattern fills the reserve pad with a repeating hex pattern
+- --reserve-pad loads N zero bytes at the end of the reserved area (pre-1.4)
+- with --reserve, SET_LOAD_OFFSET to the reserved area's last byte (no LOAD)
+- --reserve declares extra (unloaded) bytes in pre-1.4 CREATE_APP
+- finish Nano S firmware updates (MCU from bootloader, final firmware)
+- firmware repair: old bootloaders that don't report the SE firmware
+- drop --commit-format; pre-1.4 signed COMMIT is bootadr || len || DER
+- CA-signed installs on pre-1.4 (image-only app hash, bootadr+len+DER commit; sign_digest_raw; --commit-format)
+- Signed sideload on firmware before 1.4 (Nano S 1.3.x)
+- Sideload on firmware before 1.4 (Nano S 1.3.x)
+- TCP (Speculos APDU protocol) and lsdk --tcp host:port
+- firmware update: finish Nano S updates (MCU from bootloader, final firmware)
+- app load: --legacy-layout for firmware older than API levels
+- ca install: explicit --regular channel for firmware older than Ledger Recover
+- Add onboard_dev.sh: host-onboard a test device with the zero seed and PIN 1111
+- HW.1 / original Nano firmware update
+- HW.1 update: fixes from a real update to 1.0.4
+- HW.1 / original Nano firmware update (CLI)
+- HW.1 / original Nano in the web console, README
+- Support the legacy HW.1 / original Nano (BTChip firmware)
+- neutral wording for the attest_1 report
+- vendor endorsement fails because attest_1 was reportedly removed
+- host onboarding panel for test devices
+- Document the self-hosted Recover restore procedure
+- Revert offline Recover combine: the shared secret is the encrypted seed
+- Rebuild the recovery phrase offline from Recover share files
+- Install the custom CA through the Recover channel only
+- open the app automatically before app commands
+- vendor endorsement fails the same way on a Nano X (SE 2.8.0)
+- Nano S Plus gets the same empty endorsement commit in normal mode
+- vendor endorsement also fails on a Nano S Plus with the latest firmware
+- Vendor endorsement: guard against empty HSM commits, ledgerblue replies
+- Name the onboarding step in seFlags and document each bit
+- Vendor endorsement through the HSM (lsdk endorse setup --vendor)
+
 ## [0.1.1](https://github.com/KarpelesLab/lsdk/compare/v0.1.0...v0.1.1) - 2026-11-10
 
 ### Other
