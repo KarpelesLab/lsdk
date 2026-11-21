@@ -693,30 +693,43 @@ impl HwDevice {
     }
 
     /// Offline genuine check: verify the device attestation locally (no
-    /// network). The device asks to allow an insecure manager connection.
-    /// `extraIssuerKeys`: optional array of hex issuer public keys to trust.
+    /// network). `rootKey`: optional hex private key to authenticate with;
+    /// the custom CA key makes the device ask to allow that named manager,
+    /// otherwise (random key) it asks to allow an insecure connection.
+    /// `issuerKeys`: optional array of hex issuer public keys, trusted after
+    /// the pinned vendor keys, or *instead of* them when `noDefaultIssuer` is
+    /// true (to check against your own authority).
     #[wasm_bindgen(js_name = offlineGenuineCheck)]
     pub async fn offline_genuine_check(
         &self,
         on_event: Option<Function>,
-        extra_issuer_keys: Option<Vec<String>>,
+        issuer_keys: Option<Vec<String>>,
+        root_key: Option<String>,
+        no_default_issuer: Option<bool>,
     ) -> JsResult<JsValue> {
-        let extra = extra_issuer_keys
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .map(|(i, k)| {
-                hex::decode(k.trim().trim_start_matches("0x"))
-                    .map(|b| (format!("custom issuer key #{}", i + 1), b))
-                    .map_err(|e| js_err(Error::InvalidInput(format!("issuer key: {e}"))))
-            })
-            .collect::<JsResult<Vec<_>>>()?;
+        let root = root_or_random(root_key).map_err(js_err)?;
+        let only = no_default_issuer.unwrap_or(false);
+        let mut issuers = if only {
+            Vec::new()
+        } else {
+            crate::attestation::known_issuers()
+        };
+        for (i, k) in issuer_keys.unwrap_or_default().iter().enumerate() {
+            let label = if only {
+                "authority"
+            } else {
+                "custom issuer key"
+            };
+            let b = hex::decode(k.trim().trim_start_matches("0x"))
+                .map_err(|e| js_err(Error::InvalidInput(format!("issuer key: {e}"))))?;
+            issuers.push((format!("{label} #{}", i + 1), b));
+        }
         let mut cb = |ev: crate::attestation::AttestationEvent| {
             if let (Some(cb), Ok(v)) = (&on_event, to_js(&ev)) {
                 let _ = cb.call1(&JsValue::NULL, &v);
             }
         };
-        let att = crate::attestation::offline_genuine_check(&self.device, &extra, &mut cb)
+        let att = crate::attestation::offline_genuine_check(&self.device, &root, &issuers, &mut cb)
             .await
             .map_err(js_err)?;
         to_js(&att)

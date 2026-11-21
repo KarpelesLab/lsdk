@@ -1,8 +1,7 @@
 //! Offline genuine check: device attestation without contacting the vendor.
 //!
-//! The host opens the dashboard's secure channel handshake with its own,
-//! self-signed key (so the device asks the user to allow an *insecure /
-//! foreign manager connection*), then asks the device for:
+//! The host opens the dashboard's secure channel handshake with a
+//! self-signed root key, then asks the device for:
 //!
 //! 1. its factory certificate: the device public key signed by the vendor
 //!    issuer key, over `sha256(0x02 || header || device_pubkey)`;
@@ -12,6 +11,11 @@
 //! (1) checked against a pinned issuer public key shows the device key was
 //! certified at manufacturing; (2) shows the device holds that key right now
 //! (the host nonce makes it non-replayable). Nothing leaves the machine.
+//!
+//! The root key is the caller's: with the private key of the custom CA
+//! installed on the device, the device asks to allow that named manager;
+//! with any other key (e.g. [`RootKey::generate`]), it asks to allow an
+//! *insecure / foreign manager connection*.
 //!
 //! A successful check proves the secure element is authentic and its
 //! firmware unmodified; it does not prove the rest of the device is clean
@@ -40,6 +44,15 @@ pub const KNOWN_ISSUER_KEYS: &[(&str, &str)] = &[(
     "vendor issuer key #1",
     "0490f5c9d15a0134bb019d2afd0bf297149738459706e7ac5be4abc350a1f818057224fce12ec9a65de18ec34d6e8c24db927835ea1692b14c32e9836a75dad609",
 )];
+
+/// The pinned [`KNOWN_ISSUER_KEYS`], decoded: the default trust list for
+/// [`offline_genuine_check`].
+pub fn known_issuers() -> Vec<(String, Vec<u8>)> {
+    KNOWN_ISSUER_KEYS
+        .iter()
+        .map(|(n, k)| (n.to_string(), hex::decode(k).expect("valid pinned key")))
+        .collect()
+}
 
 /// Events reported during the check.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +83,7 @@ pub struct Attestation {
     /// Device certificate signed by a known issuer key, and live proof of
     /// possession of the certified device key.
     pub genuine: bool,
-    /// Name of the issuer key that signed the device certificate.
+    /// Name of the trusted issuer key that signed the device certificate.
     pub issuer: Option<String>,
     /// The device signed the fresh ephemeral key with its certified key.
     pub proof_of_possession: bool,
@@ -83,11 +96,12 @@ pub struct Attestation {
     pub certificate_header: String,
     /// Issuer certificate signature (hex DER).
     pub certificate_signature: String,
-    /// The self-signed host key the user allowed on the device (hex).
+    /// The host root key the user allowed on the device (hex): the custom CA
+    /// public key when the check ran with it.
     pub host_public_key: String,
     /// Public keys that could have produced the device certificate signature
     /// (recovered from it). One of them is the actual issuer key: useful to
-    /// identify and pin the issuer of a model not in [`KNOWN_ISSUER_KEYS`].
+    /// identify and pin the issuer of a model not in the trusted list.
     pub issuer_candidates: Vec<String>,
 }
 
@@ -122,6 +136,69 @@ pub(crate) fn random_key() -> Result<Secp256k1EcdsaPrivateKey> {
         if let Ok(key) = Secp256k1EcdsaPrivateKey::from_bytes(&k) {
             return Ok(key);
         }
+    }
+}
+
+/// A host root key (secp256k1). Use the custom CA private key to be allowed
+/// to install apps.
+#[derive(Clone)]
+pub struct RootKey(Secp256k1EcdsaPrivateKey);
+
+impl RootKey {
+    /// Generate a new random key.
+    pub fn generate() -> Result<Self> {
+        random_key().map(Self)
+    }
+
+    /// From a 32-byte secret.
+    pub fn from_bytes(secret: &[u8]) -> Result<Self> {
+        let s: [u8; 32] = secret
+            .try_into()
+            .map_err(|_| Error::InvalidInput("private key must be 32 bytes".into()))?;
+        Secp256k1EcdsaPrivateKey::from_bytes(&s)
+            .map(Self)
+            .map_err(|_| Error::InvalidInput("invalid private key".into()))
+    }
+
+    /// From a hex string.
+    pub fn from_hex(s: &str) -> Result<Self> {
+        let b = hex::decode(s.trim().trim_start_matches("0x"))
+            .map_err(|e| Error::InvalidInput(format!("private key hex: {e}")))?;
+        Self::from_bytes(&b)
+    }
+
+    /// Secret (32 bytes). Keep it safe.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    /// Uncompressed public key (65 bytes).
+    pub fn public_key(&self) -> [u8; 65] {
+        self.0.public_key().to_sec1()
+    }
+
+    /// DER ECDSA signature of a 32-byte digest (no extra hashing).
+    pub fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>> {
+        let sig = self
+            .0
+            .sign_prehash::<Sha256>(digest)
+            .map_err(|e| Error::App(format!("sign: {e:?}")))?;
+        Ok(der_encode(&sig))
+    }
+
+    /// DER ECDSA signature of `sha256(data)`.
+    pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let sig = self
+            .0
+            .sign::<Sha256>(data)
+            .map_err(|e| Error::App(format!("sign: {e:?}")))?;
+        Ok(der_encode(&sig))
+    }
+}
+
+impl core::fmt::Debug for RootKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "RootKey({})", hex::encode(self.public_key()))
     }
 }
 
@@ -221,13 +298,28 @@ pub(crate) fn host_certificate(pubkey: &[u8; 65], sig: &[u8]) -> Vec<u8> {
     c
 }
 
-/// Run the offline genuine check. `extra_issuers` are additional trusted
-/// issuer public keys (uncompressed SEC1), checked after [`KNOWN_ISSUER_KEYS`].
+/// Run the offline genuine check, authenticating the host with `root` (the
+/// custom CA private key to avoid the foreign-manager prompt, or any key).
+/// `issuers` are the authorities the device certificate is checked against,
+/// as `(name, uncompressed SEC1 public key)`, in order: pass
+/// [`known_issuers`] (possibly extended) for the vendor's, or your own list
+/// to only trust those.
 pub async fn offline_genuine_check<T: Transport>(
     device: &Device<T>,
-    extra_issuers: &[(String, Vec<u8>)],
+    root: &RootKey,
+    issuers: &[(String, Vec<u8>)],
     on_event: &mut dyn FnMut(AttestationEvent),
 ) -> Result<Attestation> {
+    if issuers.is_empty() {
+        return Err(Error::InvalidInput("no issuer key to check against".into()));
+    }
+    for (name, key) in issuers {
+        if key.len() != 65 || Secp256k1EcdsaPublicKey::from_sec1(key).is_err() {
+            return Err(Error::InvalidInput(format!(
+                "{name}: not an uncompressed secp256k1 public key (65 bytes, 04...)"
+            )));
+        }
+    }
     if !device.is_on_dashboard().await? {
         return Err(Error::DashboardExpected);
     }
@@ -278,14 +370,12 @@ pub async fn offline_genuine_check<T: Transport>(
     let signer_serial = hex::encode(&info[..4]);
     let device_nonce: [u8; 8] = info[4..12].try_into().unwrap();
 
-    // Self-signed host root key: the device asks to allow a foreign manager.
-    let root = random_key()?;
-    let root_pub = root.public_key().to_sec1();
+    // Self-signed host root certificate: the device asks to allow the custom
+    // CA's named manager if `root` is the CA, else a foreign manager.
+    let root_pub = root.public_key();
     let mut data = vec![0x01];
     data.extend_from_slice(&root_pub);
-    let sig = root
-        .sign::<Sha256>(&data)
-        .map_err(|e| Error::App(format!("sign: {e:?}")))?;
+    let sig = root.sign(&data)?;
     on_event(AttestationEvent::PermissionRequested {
         host_public_key: hex::encode(root_pub),
     });
@@ -295,7 +385,7 @@ pub async fn offline_genuine_check<T: Transport>(
             0x51,
             0x00,
             0x00,
-            host_certificate(&root_pub, &der_encode(&sig)),
+            host_certificate(&root_pub, &sig),
         ))
         .await?;
     if !r.sw.is_ok() {
@@ -310,16 +400,14 @@ pub async fn offline_genuine_check<T: Transport>(
     data.extend_from_slice(&host_nonce);
     data.extend_from_slice(&device_nonce);
     data.extend_from_slice(&eph_pub);
-    let sig = root
-        .sign::<Sha256>(&data)
-        .map_err(|e| Error::App(format!("sign: {e:?}")))?;
+    let sig = root.sign(&data)?;
     device
         .send(&Apdu::with_data(
             0xe0,
             0x51,
             0x80,
             0x00,
-            host_certificate(&eph_pub, &der_encode(&sig)),
+            host_certificate(&eph_pub, &sig),
         ))
         .await?;
 
@@ -333,20 +421,10 @@ pub async fn offline_genuine_check<T: Transport>(
     signed.extend_from_slice(&header);
     signed.extend_from_slice(&device_pub);
 
-    let mut issuer = None;
-    for (name, key) in KNOWN_ISSUER_KEYS {
-        let key = hex::decode(key).expect("valid pinned key");
-        if verify(&key, &signed, &cert_sig) {
-            issuer = Some(name.to_string());
-            break;
-        }
-    }
-    if issuer.is_none() {
-        issuer = extra_issuers
-            .iter()
-            .find(|(_, k)| verify(k, &signed, &cert_sig))
-            .map(|(n, _)| n.clone());
-    }
+    let issuer = issuers
+        .iter()
+        .find(|(_, k)| verify(k, &signed, &cert_sig))
+        .map(|(n, _)| n.clone());
 
     // Device ephemeral key signed by the device key (live proof).
     on_event(AttestationEvent::Attesting);

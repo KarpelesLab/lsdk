@@ -71,13 +71,22 @@ enum Cmd {
     /// Genuine check (through the vendor HSM, or --offline).
     Genuine {
         /// Verify the device attestation locally against pinned issuer keys,
-        /// without contacting the vendor (the device asks to allow an
-        /// insecure manager connection).
+        /// without contacting the vendor (the device asks to allow the
+        /// manager: the custom CA if its key is used, else a foreign one).
         #[arg(long)]
         offline: bool,
-        /// Extra trusted issuer public key (hex, uncompressed), repeatable.
-        #[arg(long = "issuer-key")]
+        /// Root key file for --offline (defaults to the CA key if present,
+        /// else a random key).
+        #[arg(long, requires = "offline")]
+        key: Option<std::path::PathBuf>,
+        /// Extra trusted issuer public key (hex, uncompressed, or a file
+        /// holding it), checked after the pinned vendor keys; repeatable.
+        #[arg(long = "issuer-key", requires = "offline")]
         issuer_keys: Vec<String>,
+        /// Don't trust the pinned vendor issuer keys: check only against the
+        /// --issuer-key ones (your own authority).
+        #[arg(long, requires = "issuer_keys")]
+        no_default_issuer: bool,
     },
     /// Install an app (and its parent app if needed).
     Install { name: String },
@@ -1355,18 +1364,32 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Genuine {
             offline: true,
+            key,
             issuer_keys,
+            no_default_issuer,
         } => {
-            let extra = issuer_keys
-                .iter()
-                .enumerate()
-                .map(|(i, k)| {
-                    hex::decode(k.trim_start_matches("0x"))
-                        .map(|b| (format!("--issuer-key #{}", i + 1), b))
-                        .map_err(|e| Error::InvalidInput(format!("issuer key: {e}")))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let att = lsdk::attestation::offline_genuine_check(&open(&cli)?, &extra, &mut |ev| {
+            let parse = |label: &str, v: &String| -> Result<Vec<u8>> {
+                let p = std::path::Path::new(v);
+                let s = if p.is_file() {
+                    std::fs::read_to_string(p)
+                        .map_err(|e| Error::InvalidInput(format!("{}: {e}", p.display())))?
+                } else {
+                    v.clone()
+                };
+                hex::decode(s.trim().trim_start_matches("0x"))
+                    .map_err(|e| Error::InvalidInput(format!("{label}: {e}")))
+            };
+            let mut issuers = if *no_default_issuer {
+                Vec::new()
+            } else {
+                lsdk::attestation::known_issuers()
+            };
+            for (i, k) in issuer_keys.iter().enumerate() {
+                let n = format!("--issuer-key #{}", i + 1);
+                issuers.push((n.clone(), parse(&n, k)?));
+            }
+            let root = root_key(key.as_ref())?;
+            let att = lsdk::attestation::offline_genuine_check(&open(&cli)?, &root, &issuers, &mut |ev| {
                 use lsdk::attestation::AttestationEvent::*;
                 match ev {
                     PermissionRequested { host_public_key } => eprintln!(

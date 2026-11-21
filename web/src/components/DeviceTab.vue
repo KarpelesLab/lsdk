@@ -39,18 +39,27 @@ const readName = () => guard(async () => {
 // Offline attestation (no network). Extra issuer keys are kept per browser.
 const offline = ref(null)
 const extraKeys = ref(localStorage.getItem('lsdk.issuerKeys') || '')
+const onlyTheseKeys = ref(localStorage.getItem('lsdk.issuerKeysOnly') === '1')
 const checkOffline = () => guard(async () => {
   offline.value = null
-  try { localStorage.setItem('lsdk.issuerKeys', extraKeys.value) } catch { /* private mode */ }
+  try {
+    localStorage.setItem('lsdk.issuerKeys', extraKeys.value)
+    localStorage.setItem('lsdk.issuerKeysOnly', onlyTheseKeys.value ? '1' : '0')
+  } catch { /* private mode */ }
   const keys = extraKeys.value.split(/\s+/).filter(Boolean)
+  // The custom CA key (if saved) avoids the insecure-connection prompt.
+  let caKey = null
+  try { caKey = localStorage.getItem('lsdk.caKey') || null } catch { /* none */ }
   offline.value = await run('offline genuine check', (d) => d.offlineGenuineCheck((ev) => {
     if (ev.type === 'permissionRequested') {
-      state.prompt = 'Compare the manager key, then allow the insecure connection on the device'
+      state.prompt = caKey
+        ? 'Allow the custom CA manager on the device'
+        : 'Compare the manager key, then allow the insecure connection on the device'
       state.promptDetail = ev.hostPublicKey
     }
     if (ev.type === 'permissionGranted') { state.prompt = null; state.promptDetail = null }
     if (ev.type === 'attesting') state.prompt = 'The device is signing its attestation (a few seconds)…'
-  }, keys))
+  }, keys, caKey, onlyTheseKeys.value && keys.length > 0))
   log(offline.value.genuine ? 'ok' : 'error', offline.value.genuine
     ? `offline attestation verified (${offline.value.issuer})`
     : 'offline attestation NOT verified')
@@ -144,7 +153,8 @@ const quit = () => guard(quitApp)
         <p class="muted small-text">
           Verifies the device attestation locally, without contacting the vendor: the device certificate must be
           signed by a known issuer key, and the device must sign a fresh challenge with the certified key.
-          The device will warn about an <b>insecure manager connection</b>: that's expected, nothing is installed.
+          Without a saved custom CA key, the device will warn about an <b>insecure manager connection</b>: that's
+          expected, nothing is installed.
         </p>
         <div class="row">
           <button :disabled="!!state.busy || !onDashboard" @click="checkOffline">Run offline check</button>
@@ -152,8 +162,9 @@ const quit = () => guard(quitApp)
           <span v-else-if="offline" class="badge err">✗ not verified</span>
         </div>
         <details style="margin-top:8px">
-          <summary class="muted small-text">Additional trusted issuer keys</summary>
+          <summary class="muted small-text">Trusted issuer keys</summary>
           <textarea v-model="extraKeys" rows="2" placeholder="04… (uncompressed hex, one per line)" style="margin-top:6px"></textarea>
+          <label class="small-text"><input v-model="onlyTheseKeys" type="checkbox" /> Only trust these keys (ignore the pinned vendor key)</label>
         </details>
         <dl v-if="offline" class="kv" style="margin-top:10px">
           <dt>Issuer</dt><dd>{{ offline.issuer || 'no known issuer key matches' }}</dd>

@@ -19,12 +19,12 @@
 //! IVs chained across the session in both directions.
 
 use purecrypto::cipher::{Aes128, Aes256, AesSiv, BlockCipher};
+use purecrypto::ec::Secp256k1EcdsaPublicKey;
 use purecrypto::ec::secp256k1::{AffinePoint, ProjectivePoint, Scalar};
-use purecrypto::ec::{Secp256k1EcdsaPrivateKey, Secp256k1EcdsaPublicKey};
-use purecrypto::hash::{Sha256, sha256};
+use purecrypto::hash::sha256;
 
 use crate::apdu::{Apdu, Reader, StatusWord};
-use crate::attestation::{der_encode, host_certificate, rand_bytes, random_key, verify};
+use crate::attestation::{host_certificate, rand_bytes, random_key, verify};
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::os::OsVersion;
@@ -58,68 +58,7 @@ pub mod ins {
     pub const RECOVER_DELETE_CA: u8 = 0xd3;
 }
 
-/// A host root key (secp256k1). Use the custom CA private key to be allowed
-/// to install apps.
-#[derive(Clone)]
-pub struct RootKey(Secp256k1EcdsaPrivateKey);
-
-impl RootKey {
-    /// Generate a new random key.
-    pub fn generate() -> Result<Self> {
-        random_key().map(Self)
-    }
-
-    /// From a 32-byte secret.
-    pub fn from_bytes(secret: &[u8]) -> Result<Self> {
-        let s: [u8; 32] = secret
-            .try_into()
-            .map_err(|_| Error::InvalidInput("private key must be 32 bytes".into()))?;
-        Secp256k1EcdsaPrivateKey::from_bytes(&s)
-            .map(Self)
-            .map_err(|_| Error::InvalidInput("invalid private key".into()))
-    }
-
-    /// From a hex string.
-    pub fn from_hex(s: &str) -> Result<Self> {
-        let b = hex::decode(s.trim().trim_start_matches("0x"))
-            .map_err(|e| Error::InvalidInput(format!("private key hex: {e}")))?;
-        Self::from_bytes(&b)
-    }
-
-    /// Secret (32 bytes). Keep it safe.
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_bytes()
-    }
-
-    /// Uncompressed public key (65 bytes).
-    pub fn public_key(&self) -> [u8; 65] {
-        self.0.public_key().to_sec1()
-    }
-
-    /// DER ECDSA signature of a 32-byte digest (no extra hashing).
-    pub fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>> {
-        let sig = self
-            .0
-            .sign_prehash::<Sha256>(digest)
-            .map_err(|e| Error::App(format!("sign: {e:?}")))?;
-        Ok(der_encode(&sig))
-    }
-
-    /// DER ECDSA signature of `sha256(data)`.
-    pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let sig = self
-            .0
-            .sign::<Sha256>(data)
-            .map_err(|e| Error::App(format!("sign: {e:?}")))?;
-        Ok(der_encode(&sig))
-    }
-}
-
-impl core::fmt::Debug for RootKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "RootKey({})", hex::encode(self.public_key()))
-    }
-}
+pub use crate::attestation::RootKey;
 
 /// Owner certificate for an endorsement key: DER signature by `owner` over
 /// `sha256(0xFE || endorsement_public_key)`.
