@@ -130,6 +130,31 @@ pub struct CatalogOsu {
     pub date_last_modified: Option<String>,
 }
 
+/// OSU hashes the API is known to get wrong, by OSU id: `(id, correct hash)`.
+///
+/// - 56 (`1.6.0-osu-hidden`, Nano S from 1.3.1): the API value keeps the real
+///   first/last 4 characters but its middle is copied from the 1.3.1 OSU hash.
+const OSU_HASH_OVERRIDES: &[(u32, &str)] = &[(
+    56,
+    "9e54738f0235898098a1dbcefd9399380508d8e152d16652ccddf59bf317a009",
+)];
+
+/// Corrected hash for an OSU id whose API hash is known to be wrong.
+pub fn osu_hash_override(osu_id: u32) -> Option<&'static str> {
+    OSU_HASH_OVERRIDES
+        .iter()
+        .find(|(id, _)| *id == osu_id)
+        .map(|(_, h)| *h)
+}
+
+impl OsuFirmware {
+    /// Hash the device should display after receiving this OSU: the known
+    /// correction if any, else the API value as returned.
+    pub fn expected_hash(&self) -> Option<&str> {
+        osu_hash_override(self.id).or(self.hash.as_deref())
+    }
+}
+
 /// An MCU firmware version.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McuVersion {
@@ -485,4 +510,37 @@ impl ManagerApi {
 pub fn find_best_mcu(mcus: &[McuVersion]) -> Option<&McuVersion> {
     mcus.iter()
         .max_by_key(|m| crate::model::parse_version(&m.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn osu(id: u32, hash: Option<&str>) -> OsuFirmware {
+        OsuFirmware {
+            id,
+            name: "x-osu".into(),
+            perso: "perso_11".into(),
+            firmware: "f".into(),
+            firmware_key: "k".into(),
+            hash: hash.map(str::to_owned),
+            next_se_firmware_final_version: 0,
+            previous_se_firmware_final_versions: vec![],
+            notes: None,
+            description: None,
+            display_name: None,
+        }
+    }
+
+    #[test]
+    fn osu_hash_override() {
+        // API value kept verbatim (case included) when not overridden.
+        assert_eq!(osu(16, Some("AbCd")).expected_hash(), Some("AbCd"));
+        assert_eq!(osu(16, None).expected_hash(), None);
+        let api = "9E544503452b5810b42e6e715d4fe8ff3765f06758c78eefe3977e1949a1A009";
+        assert_eq!(
+            osu(56, Some(api)).expected_hash(),
+            Some("9e54738f0235898098a1dbcefd9399380508d8e152d16652ccddf59bf317a009")
+        );
+    }
 }

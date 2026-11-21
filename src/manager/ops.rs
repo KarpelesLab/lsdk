@@ -59,6 +59,10 @@ pub struct FirmwareUpdate {
     pub osu: OsuFirmware,
     #[serde(rename = "final")]
     pub final_firmware: FinalFirmware,
+    /// OSU hash the device should display once received (to compare on
+    /// screen). Differs from `osu.hash` when the API value is known wrong.
+    #[serde(default)]
+    pub expected_hash: Option<String>,
     /// The MCU must be flashed after the OSU (older models only).
     pub should_flash_mcu: bool,
 }
@@ -481,6 +485,7 @@ impl Manager {
             }
         };
         Ok(Some(FirmwareUpdate {
+            expected_hash: osu.expected_hash().map(str::to_owned),
             osu,
             final_firmware,
             should_flash_mcu,

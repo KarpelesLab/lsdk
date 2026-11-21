@@ -749,7 +749,13 @@ fn print_firmware_paths(p: &lsdk::manager::ops::FirmwarePaths) {
             );
             println!("{sub}  osu script   {}", opt(&o.firmware));
             println!("{sub}  osu key      {}", opt(&o.firmware_key));
-            println!("{sub}  osu hash     {}", opt(&o.hash));
+            match lsdk::manager::api::osu_hash_override(o.id) {
+                Some(h) => println!(
+                    "{sub}  osu hash     {h} (corrected; manager API says {})",
+                    opt(&o.hash)
+                ),
+                None => println!("{sub}  osu hash     {}", opt(&o.hash)),
+            }
             println!(
                 "{sub}  osu          perso {}, providers {:?}, device versions {:?}, created {}, modified {}",
                 opt(&o.perso),
@@ -2041,6 +2047,24 @@ async fn run(cli: Cli) -> Result<()> {
                         Some(d)
                     } else {
                         if !os.is_osu && !os.is_bootloader {
+                            match &u.expected_hash {
+                                Some(h) => {
+                                    eprintln!(
+                                        "> the device will show the OSU hash, compare it with:"
+                                    );
+                                    eprintln!(">   {h}");
+                                    if let Some(api) = u.osu.hash.as_deref().filter(|a| a != h) {
+                                        eprintln!(
+                                            ">   (manager API says {api}, known to be wrong for {})",
+                                            u.osu.name
+                                        );
+                                    }
+                                }
+                                None => eprintln!(
+                                    "> the manager API gives no hash for {}: nothing to compare against",
+                                    u.osu.name
+                                ),
+                            }
                             eprintln!("> installing the OS updater: confirm on the device");
                             manager.install_osu(&d, &u, &mut progress).await?;
                         }
