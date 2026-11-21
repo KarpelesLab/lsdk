@@ -645,8 +645,22 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
     /// Installed apps (no extra consent: the channel is authenticated).
     pub async fn list_apps(&mut self) -> Result<Vec<SecureAppEntry>> {
         let mut out = Vec::new();
-        let mut d = self.exchange(ins::LIST_APPS, &[]).await?;
         let old = matches!(self.session, Session::V2 { .. });
+        // Before 1.4 the list has no end marker, so take the app count from
+        // the memory info and stop there (best effort: the erased-slot checks
+        // below still end the list without it).
+        let expected = if old {
+            self.get_memory_info()
+                .await
+                .ok()
+                .map(|m| m.used_app_slots as usize)
+        } else {
+            None
+        };
+        if expected == Some(0) {
+            return Ok(out);
+        }
+        let mut d = self.exchange(ins::LIST_APPS, &[]).await?;
         while !d.is_empty() {
             let mut r = Reader::new(&d);
             if old {
@@ -655,7 +669,8 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
                 // (APPLICATION_FLAG_NEG_MASK). The list has no end marker
                 // (1.3.1): past the last app the device returns erased slots
                 // (all 0xff, failing that check), and asking for more after
-                // that crashes it. Stop at the first one.
+                // that crashes it. Stop at the app count, or failing that at
+                // the first erased slot.
                 while !r.is_empty() {
                     let _entry_size = r.u8()?;
                     let raw = r.lv()?;
@@ -675,6 +690,9 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
                         hash_code_data: String::new(),
                         hash,
                     });
+                    if expected.is_some_and(|n| out.len() >= n) {
+                        return Ok(out);
+                    }
                 }
                 d = self.exchange(ins::LIST_APPS_CONTINUE, &[]).await?;
                 continue;
