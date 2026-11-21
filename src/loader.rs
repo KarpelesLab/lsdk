@@ -331,8 +331,9 @@ impl AppImage {
 
     /// `CREATE_APP` payload for firmware before 1.4 (e.g. Nano S 1.3.x):
     /// whole length (code and data), flags, name, inline icon and a
-    /// derivation restriction (`ff`: any curve, no path). Install
-    /// parameters are not part of this layout and are left out.
+    /// derivation restriction (`ff`: any curve, no path), then the version
+    /// when known (as ledgerblue's `--appVersion`). Install parameters are
+    /// not part of this layout and are left out.
     /// `reserve` extra bytes are declared after the image without being
     /// loaded.
     pub fn create_app_params_pre_1_4(&self, icon: &[u8], reserve: u32) -> Result<Vec<u8>> {
@@ -349,6 +350,13 @@ impl AppImage {
         d.push(icon.len() as u8);
         d.extend_from_slice(icon);
         d.extend_from_slice(&[0x01, 0xff]);
+        if let Some(v) = self.version.as_deref().filter(|v| !v.is_empty()) {
+            if v.len() > 32 {
+                return Err(Error::InvalidInput("app version too long (32 max)".into()));
+            }
+            d.push(v.len() as u8);
+            d.extend_from_slice(v.as_bytes());
+        }
         Ok(d)
     }
 

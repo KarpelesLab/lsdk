@@ -2838,9 +2838,12 @@ struct CreateAppArgs {
     /// Pre-1.4: derivation restriction (hex; ff = any curve, no path).
     #[arg(long, default_value = "ff")]
     derivation: String,
+    /// Pre-1.4: app version (32 bytes max; left out when not given).
+    #[arg(long)]
+    app_version: Option<String>,
     /// Send this payload (hex) as is instead of building it.
     #[arg(long, conflicts_with_all = [
-        "code_len", "api_level", "legacy_layout", "length", "name",
+        "code_len", "api_level", "legacy_layout", "length", "name", "app_version",
     ])]
     raw: Option<String>,
 }
@@ -2894,9 +2897,16 @@ fn create_app_payload(a: &CreateAppArgs, pre_1_4: bool) -> Result<Vec<u8>> {
             d.push(f.len() as u8);
             d.extend_from_slice(f);
         }
+        if let Some(v) = &a.app_version {
+            if v.len() > 32 {
+                return Err(Error::InvalidInput("--app-version is 32 bytes max".into()));
+            }
+            d.push(v.len() as u8);
+            d.extend_from_slice(v.as_bytes());
+        }
     } else {
-        if a.length.is_some() || a.name.is_some() {
-            return Err(wrong("--length / --name"));
+        if a.length.is_some() || a.name.is_some() || a.app_version.is_some() {
+            return Err(wrong("--length / --name / --app-version"));
         }
         let code_len = a
             .code_len
@@ -3279,6 +3289,13 @@ mod tests {
             img.create_app_params_pre_1_4(&[1, 2], 0).unwrap()
         );
         assert!(create_app_payload(&a, false).is_err());
+        let mut versioned = img.clone();
+        versioned.version = Some("1.2.3".into());
+        let a =
+            ca("create-app --length 960 --flags 0x200 --name Test --icon 0102 --app-version 1.2.3");
+        let d = create_app_payload(&a, true).unwrap();
+        assert_eq!(d, versioned.create_app_params_pre_1_4(&[1, 2], 0).unwrap());
+        assert!(d.ends_with(b"\x01\xff\x051.2.3"));
         assert_eq!(
             create_app_payload(&ca("create-app --raw 0a0b"), false).unwrap(),
             [10, 11]
