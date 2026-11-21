@@ -649,9 +649,16 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             let mut r = Reader::new(&d);
             if old {
                 // Before 1.4: entries of size(1), name LV, flags(4), hash(32).
+                // The list has no end marker there (1.3.1): past the last app
+                // the device returns erased slots (name all 0xff), and asking
+                // for more after that crashes it. Stop at the first one.
                 while !r.is_empty() {
                     let _entry_size = r.u8()?;
-                    let name = r.lv_string()?;
+                    let raw = r.lv()?;
+                    if raw.is_empty() || raw.contains(&0xff) {
+                        return Ok(out);
+                    }
+                    let name = String::from_utf8_lossy(raw).into_owned();
                     let flags = r.u32()?;
                     let hash = hex::encode(r.bytes(32)?);
                     out.push(SecureAppEntry {
