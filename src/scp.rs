@@ -119,6 +119,8 @@ pub struct MemoryInfo {
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct SecureAppEntry {
     pub name: String,
+    /// App flags (`APPLICATION_FLAG_*`). Before 1.4 the low half of the
+    /// registry word; from 1.4 the raw 4 bytes the dashboard sends.
     pub flags: u32,
     pub hash_code_data: String,
     pub hash: String,
@@ -649,17 +651,23 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
             let mut r = Reader::new(&d);
             if old {
                 // Before 1.4: entries of size(1), name LV, flags(4), hash(32).
-                // The list has no end marker there (1.3.1): past the last app
-                // the device returns erased slots (name all 0xff), and asking
-                // for more after that crashes it. Stop at the first one.
+                // The flags are the registry word: `!flags << 16 | flags`
+                // (APPLICATION_FLAG_NEG_MASK). The list has no end marker
+                // (1.3.1): past the last app the device returns erased slots
+                // (all 0xff, failing that check), and asking for more after
+                // that crashes it. Stop at the first one.
                 while !r.is_empty() {
                     let _entry_size = r.u8()?;
                     let raw = r.lv()?;
                     if raw.is_empty() || raw.contains(&0xff) {
                         return Ok(out);
                     }
+                    let word = r.u32()?;
+                    if (word >> 16) != (!word & 0xffff) {
+                        return Ok(out);
+                    }
                     let name = String::from_utf8_lossy(raw).into_owned();
-                    let flags = r.u32()?;
+                    let flags = word & 0xffff;
                     let hash = hex::encode(r.bytes(32)?);
                     out.push(SecureAppEntry {
                         name,
