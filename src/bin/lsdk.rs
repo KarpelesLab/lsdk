@@ -844,6 +844,13 @@ fn progress(ev: HsmEvent) {
             bytes,
             total_bytes,
         } => {
+            if index == 0 {
+                apdu_log::note(format_args!(
+                    "hsm: bulk started: {total} APDUs, {total_bytes} data bytes (websocket closed)"
+                ));
+            } else if index == total {
+                apdu_log::note(format_args!("hsm: bulk done: {total} APDUs, {bytes} bytes"));
+            }
             eprint!("\r> {index}/{total} APDUs, {bytes}/{total_bytes} bytes");
             if index == total {
                 eprintln!();
