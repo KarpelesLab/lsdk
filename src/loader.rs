@@ -563,6 +563,10 @@ pub struct InstallOptions<'a> {
     pub reserve_pad: u32,
     /// Pattern repeated over the reserve pad (zeros when unset).
     pub reserve_pad_pattern: Option<&'a [u8]>,
+    /// Experimental: skip `FLUSH` after each window's `LOAD`s.
+    pub no_flush: bool,
+    /// Experimental: skip the per-window `CRC` check.
+    pub no_crc: bool,
 }
 
 /// Install an app. See [`install_app_with`] for signing.
@@ -676,11 +680,15 @@ pub async fn install_app_with<T: Transport>(
                 sent += chunk.len();
                 on_progress(sent, total);
             }
-            chan.exchange(ins::FLUSH, &[]).await?;
-            let mut crc = vec![0, 0];
-            crc.extend_from_slice(&(window.len() as u32).to_be_bytes());
-            crc.extend_from_slice(&crc16(window).to_be_bytes());
-            chan.exchange(ins::CRC, &crc).await?;
+            if !opts.no_flush {
+                chan.exchange(ins::FLUSH, &[]).await?;
+            }
+            if !opts.no_crc {
+                let mut crc = vec![0, 0];
+                crc.extend_from_slice(&(window.len() as u32).to_be_bytes());
+                crc.extend_from_slice(&crc16(window).to_be_bytes());
+                chan.exchange(ins::CRC, &crc).await?;
+            }
         }
     }
     if opts.reserve > 0 && opts.reserve_pad == 0 {

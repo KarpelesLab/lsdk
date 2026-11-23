@@ -524,6 +524,12 @@ struct LoadArgs {
     /// Hex pattern repeated over the reserve pad (e.g. ff, deadbeef).
     #[arg(long)]
     reserve_pad_pattern: Option<String>,
+    /// Experimental: skip FLUSH after each 64 KiB window of LOADs.
+    #[arg(long)]
+    no_flush: bool,
+    /// Experimental: skip the CRC check after each 64 KiB window.
+    #[arg(long)]
+    no_crc: bool,
 }
 
 #[derive(Subcommand)]
@@ -2849,6 +2855,8 @@ async fn install_loaded(
         reserve: a.reserve,
         reserve_pad: a.reserve_pad,
         reserve_pad_pattern: pattern.as_deref(),
+        no_flush: a.no_flush,
+        no_crc: a.no_crc,
     };
     lsdk::loader::install_app_with(chan, img, &opts, &mut |sent, total| {
         eprint!("\r> loading {sent}/{total}");
