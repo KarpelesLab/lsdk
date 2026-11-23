@@ -476,10 +476,18 @@ impl AppImage {
         ))
     }
 
-    /// Application hash, as computed by the device and reported by app
-    /// listings: `sha256(target_id || CREATE_APP params || image)`.
+    /// Application hash the device accumulates over a 1.4+ load and verifies
+    /// the COMMIT signature against: `sha256([target_id] || CREATE_APP params
+    /// || image)`. As ledgerblue's `hexLoader.load`, the target id (big-endian,
+    /// followed by the — here empty — target version string) is part of the
+    /// hash only when `target_id & 0xF > 3`; Nano S 1.4.x is `0x…3` and leaves
+    /// it out, so signing it in gives the device a hash that never matches and
+    /// COMMIT answers 0x6985.
     pub fn app_hash(&self, target_id: u32) -> Result<[u8; 32]> {
-        let mut d = target_id.to_be_bytes().to_vec();
+        let mut d = Vec::new();
+        if target_id & 0xf > 3 {
+            d.extend_from_slice(&target_id.to_be_bytes());
+        }
         d.extend(self.create_app_params()?);
         d.extend(self.flat_image());
         Ok(purecrypto::hash::sha256(&d))
