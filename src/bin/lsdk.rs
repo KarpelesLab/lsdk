@@ -557,6 +557,10 @@ enum FirmwareCmd {
         /// OS updater to use instead of the latest (e.g. 1.4.2-osu-hidden).
         #[arg(long)]
         osu: Option<String>,
+        /// Append every APDU exchanged with the device (both directions,
+        /// timestamped, across reconnects) and the update steps to this file.
+        #[arg(long)]
+        log: Option<std::path::PathBuf>,
     },
     /// List the update paths from the installed firmware (OSUs, with the
     /// catalog's script names, hashes and sizes).
@@ -572,7 +576,12 @@ enum FirmwareCmd {
         json: bool,
     },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
-    Repair,
+    Repair {
+        /// Append every APDU exchanged with the device to this file (as
+        /// `firmware update --log`).
+        #[arg(long)]
+        log: Option<std::path::PathBuf>,
+    },
     /// Firmware integrity hash (vendor HSM sessions only: refused with a custom CA).
     Hash {
         #[arg(long)]
@@ -809,9 +818,20 @@ fn print_firmware_paths(p: &lsdk::manager::ops::FirmwarePaths) {
 
 fn progress(ev: HsmEvent) {
     match ev {
-        HsmEvent::Installing { name } => eprintln!("> installing {name}"),
-        HsmEvent::PermissionRequested => eprintln!("> allow the secure connection on the device"),
-        HsmEvent::PermissionGranted => eprintln!("> secure connection allowed"),
+        HsmEvent::Installing { name } => {
+            apdu_log::note(format_args!("hsm: installing {name}"));
+            eprintln!("> installing {name}")
+        }
+        HsmEvent::PermissionRequested => {
+            apdu_log::note(format_args!(
+                "hsm: waiting for the user to allow the secure connection"
+            ));
+            eprintln!("> allow the secure connection on the device")
+        }
+        HsmEvent::PermissionGranted => {
+            apdu_log::note(format_args!("hsm: secure connection allowed"));
+            eprintln!("> secure connection allowed")
+        }
         HsmEvent::Progress {
             index,
             total,
@@ -824,12 +844,90 @@ fn progress(ev: HsmEvent) {
             }
             let _ = std::io::stderr().flush();
         }
-        HsmEvent::Warning { message } => eprintln!("> warning: {message}"),
+        HsmEvent::Warning { message } => {
+            apdu_log::note(format_args!("hsm warning: {message}"));
+            eprintln!("> warning: {message}")
+        }
         // LSDK_DEBUG=1: log the APDUs the HSM sends through us.
         HsmEvent::Exchange { apdu, status } if std::env::var_os("LSDK_DEBUG").is_some() => {
             eprintln!("> hsm apdu {} -> {status:04x}", hex::encode(&apdu));
         }
+        HsmEvent::Opened => apdu_log::note(format_args!("hsm: websocket connected")),
         _ => {}
+    }
+}
+
+/// `--log`: every APDU through a [`Link`], appended to a file with a
+/// timestamp and the time since the log started. Lines:
+/// `[unix time] +elapsed > apdu`, `... < response (ms)`, `... ! error`,
+/// `... # note`. Each line is flushed, so a crash or a power cut keeps it.
+mod apdu_log {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    struct Log {
+        file: std::fs::File,
+        start: Instant,
+    }
+
+    static LOG: Mutex<Option<Log>> = Mutex::new(None);
+
+    pub fn enabled() -> bool {
+        LOG.lock().map(|l| l.is_some()).unwrap_or(false)
+    }
+
+    pub fn start(path: &std::path::Path) -> lsdk::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| lsdk::Error::InvalidInput(format!("{}: {e}", path.display())))?;
+        *LOG.lock().unwrap_or_else(|e| e.into_inner()) = Some(Log {
+            file,
+            start: Instant::now(),
+        });
+        note(format_args!(
+            "log started: lsdk {} {}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::args().skip(1).collect::<Vec<_>>().join(" ")
+        ));
+        eprintln!("> logging device exchanges to {}", path.display());
+        Ok(())
+    }
+
+    fn line(tag: char, msg: std::fmt::Arguments) {
+        let mut g = LOG.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(l) = g.as_mut() else { return };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let el = l.start.elapsed();
+        let _ = writeln!(
+            l.file,
+            "[{}.{:03}] +{}.{:03} {tag} {msg}",
+            now.as_secs(),
+            now.subsec_millis(),
+            el.as_secs(),
+            el.subsec_millis()
+        );
+        let _ = l.file.flush();
+    }
+
+    pub fn note(msg: std::fmt::Arguments) {
+        line('#', msg)
+    }
+
+    pub fn out(apdu: &[u8]) {
+        line('>', format_args!("{}", hex::encode(apdu)))
+    }
+
+    pub fn reply(resp: &lsdk::Result<Vec<u8>>, took: std::time::Duration) {
+        let ms = took.as_millis();
+        match resp {
+            Ok(r) => line('<', format_args!("{} ({ms} ms)", hex::encode(r))),
+            Err(e) => line('!', format_args!("{e} ({ms} ms)")),
+        }
     }
 }
 
@@ -855,18 +953,27 @@ impl Link {
 
 impl lsdk::Transport for Link {
     async fn exchange(&self, apdu: &[u8]) -> Result<Vec<u8>> {
-        match self {
+        let logged = apdu_log::enabled();
+        if logged {
+            apdu_log::out(apdu);
+        }
+        let start = std::time::Instant::now();
+        let r = match self {
             Link::Hid(t) => t.exchange(apdu).await,
             Link::Tcp(t) => t.exchange(apdu).await,
+        };
+        if logged {
+            apdu_log::reply(&r, start.elapsed());
         }
+        r
     }
 }
 
 fn open(cli: &Cli) -> Result<Device<Link>> {
     if let Some(addr) = &cli.tcp {
-        return Ok(Device::new(Link::Tcp(TcpTransport::connect(
-            addr.as_str(),
-        )?)));
+        let t = TcpTransport::connect(addr.as_str())?;
+        apdu_log::note(format_args!("connected to {addr} (tcp)"));
+        return Ok(Device::new(Link::Tcp(t)));
     }
     let list = HidTransport::list()?;
     let info = match &cli.device {
@@ -885,6 +992,14 @@ fn open(cli: &Cli) -> Result<Device<Link>> {
     if t.backend() == "usbfs" && !cli.usbfs_quiet() {
         eprintln!("note: {} is not accessible, using raw USB", info.path);
     }
+    apdu_log::note(format_args!(
+        "opened {} ({:04x}:{:04x} {}, {})",
+        info.path,
+        info.vendor_id,
+        info.product_id,
+        info.product.as_deref().unwrap_or("?"),
+        t.backend()
+    ));
     Ok(Device::new(Link::Hid(t)))
 }
 
@@ -1988,6 +2103,11 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Firmware { cmd } => {
+            if let FirmwareCmd::Update { log: Some(p), .. } | FirmwareCmd::Repair { log: Some(p) } =
+                cmd
+            {
+                apdu_log::start(p)?;
+            }
             let d = open(&cli)?;
             let os = d.get_version().await?;
             // An update interrupted in bootloader mode resumes from its saved
@@ -2007,13 +2127,13 @@ async fn run(cli: Cli) -> Result<()> {
                     pending_path.display()
                 );
                 Some(p)
-            } else if os.is_bootloader || matches!(cmd, FirmwareCmd::Repair) {
+            } else if os.is_bootloader || matches!(cmd, FirmwareCmd::Repair { .. }) {
                 drop(d);
                 repair_loop(&cli, &manager).await?;
                 return Ok(());
             } else {
                 let osu = match cmd {
-                    FirmwareCmd::Check { osu } | FirmwareCmd::Update { osu } => osu.as_deref(),
+                    FirmwareCmd::Check { osu } | FirmwareCmd::Update { osu, .. } => osu.as_deref(),
                     _ => None,
                 };
                 if osu.is_some() && os.is_osu {
@@ -2025,7 +2145,12 @@ async fn run(cli: Cli) -> Result<()> {
                 manager.firmware_update_via(&os, osu).await?
             };
             match (cmd, update) {
-                (FirmwareCmd::Repair | FirmwareCmd::Hash { .. } | FirmwareCmd::Paths { .. }, _) => {
+                (
+                    FirmwareCmd::Repair { .. }
+                    | FirmwareCmd::Hash { .. }
+                    | FirmwareCmd::Paths { .. },
+                    _,
+                ) => {
                     unreachable!()
                 }
                 (_, None) => println!("firmware {} is up to date", os.se_version),
@@ -2035,6 +2160,10 @@ async fn run(cli: Cli) -> Result<()> {
                         "updating {} -> {} (OSU {}, id {})",
                         os.se_version, u.final_firmware.name, u.osu.name, u.osu.id
                     );
+                    apdu_log::note(format_args!(
+                        "update plan: {}",
+                        serde_json::to_string(&u).unwrap_or_default()
+                    ));
                     if let Some(dir) = pending_path.parent() {
                         let _ = std::fs::create_dir_all(dir);
                     }
@@ -2089,6 +2218,10 @@ async fn run(cli: Cli) -> Result<()> {
                                 ),
                             }
                             eprintln!("> installing the OS updater: confirm on the device");
+                            apdu_log::note(format_args!(
+                                "step: install the OS updater {}",
+                                u.osu.name
+                            ));
                             manager.install_osu(&d, &u, &mut progress).await?;
                         }
                         drop(d);
@@ -2126,6 +2259,7 @@ async fn run(cli: Cli) -> Result<()> {
                         );
                         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
                         if *last != seen {
+                            apdu_log::note(format_args!("device state: {seen}"));
                             eprintln!("> device: {seen}");
                             *last = seen;
                         }
@@ -2152,6 +2286,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 Err(e) => return Err(e),
                             };
                             if os.is_bootloader {
+                                apdu_log::note(format_args!("step: flash the MCU"));
                                 let kind = manager.flash_mcu(&d, &u, &mut progress).await?;
                                 eprintln!("> flashed {kind:?}");
                                 flashed += 1;
@@ -2210,6 +2345,10 @@ async fn run(cli: Cli) -> Result<()> {
                             }
                         };
                         eprintln!("> installing the final firmware {}", u.final_firmware.name);
+                        apdu_log::note(format_args!(
+                            "step: install the final firmware {}",
+                            u.final_firmware.name
+                        ));
                         manager
                             .install_final_firmware(&d, &u, &mut progress)
                             .await?;
@@ -2542,6 +2681,10 @@ async fn repair_loop(cli: &Cli, manager: &Manager) -> Result<()> {
             os.maj_min(),
             os.se_version
         );
+        apdu_log::note(format_args!(
+            "step: repair the MCU from bootloader {}",
+            os.maj_min()
+        ));
         let kind = manager.repair_mcu(&d, &mut progress).await?;
         eprintln!("flashed {kind:?}, waiting for the device to restart...");
         drop(d);
@@ -3208,7 +3351,12 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    if let Err(e) = rt.block_on(run(cli)) {
+    let r = rt.block_on(run(cli));
+    match &r {
+        Ok(()) => apdu_log::note(format_args!("done")),
+        Err(e) => apdu_log::note(format_args!("error: {e}")),
+    }
+    if let Err(e) = r {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
