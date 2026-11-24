@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/KarpelesLab/lsdk/compare/v0.2.0...v0.3.0) - 2026-11-24
+
+### Fixed
+
+- *(wasm)* gate device_session to non-wasm (dead code under --features wasm)
+
+### Other
+
+- rustfmt the firmware-download logging/keyfile code
+- firmware download: emit a decrypted session log with the ephemeral key
+- firmware download --step final: treat empty catalog firmware as "no separate image"
+- firmware download: offset-aware reconstruction, Intel HEX output, and the final (post-OSU) step
+- firmware download: reconstruct and decrypt the firmware image from the emulated device
+- firmware download --device-key: capture vendor firmware via the emulated device (reaches the HSM load phase)
+- genuine --device-key: also run the online (vendor HSM) check against the emulated device
+- genuine --offline --device-key <file>: run the check against a dumped SE attestation key (emulated virtual device)
+- firmware update/repair --log: note when the HSM bulk phase starts (APDU count, data bytes) and when it ends
+- app load --no-flush / --no-crc: skip FLUSH and/or the per-window CRC check (experimental)
+- sign the app hash without the target id on 1.4.x (target 0x…3)
+- firmware update/repair --log <file>: append every APDU exchanged with the device (timestamped, with response times and errors, across reconnects) plus devices opened, states seen, the plan, steps, HSM events and the outcome
+- pre-1.4 CREATE_APP sends the app version after the derivation path, as ledgerblue's --appVersion (console create-app: --app-version)
+- pre-1.4 app list reads until the used-slot count (skipping erased slots, capped at the slot count) instead of stopping at the first erased slot; without the counts the first erased slot still ends it
+- pre-1.4 app list stops at the used-slot count from the memory info, so it never asks past the last app
+- pre-1.4 app list reports the real flags (low half of the registry word, high half is its complement) and also ends on a word failing that check
+- pre-1.4 app list stops at the first erased slot (1.3.1 has no end marker and crashes when asked past it)
+
 ## [0.2.0](https://github.com/KarpelesLab/lsdk/compare/v0.1.1...v0.2.0) - 2026-11-21
 
 ### Other
