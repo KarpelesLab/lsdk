@@ -399,6 +399,8 @@ impl Session {
 /// ephemeral private scalar and the host ephemeral public key (mirror of what
 /// the host computes in [`SecureChannel::open_with`]). Used by the key-file
 /// virtual device; Recover mode is not needed there.
+// Only the key-file virtual device uses this, and that transport is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn device_session(
     device_eph_secret: &[u8; 32],
     host_eph_pub: &[u8],
