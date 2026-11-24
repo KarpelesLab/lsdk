@@ -77,9 +77,11 @@ struct State {
     /// The opened secure channel, after `E053` (scp feature only).
     #[cfg(feature = "scp")]
     session: Option<crate::scp::Session>,
-    /// Decrypted firmware image reconstructed from the secure LOAD commands
-    /// (online install/download), honoring SET_LOAD_OFFSET.
-    fw_buf: Vec<u8>,
+    /// Firmware written by the secure LOAD commands (online install/download),
+    /// as (absolute offset, bytes) segments; the image is sparse, so it is
+    /// emitted as Intel HEX rather than a zero-filled flat image.
+    fw_segments: Vec<(u32, Vec<u8>)>,
+    /// Current region base, from SET_LOAD_OFFSET.
     fw_offset: usize,
 }
 
@@ -167,6 +169,16 @@ impl KeyFileTransport {
     /// The device attestation public key (uncompressed SEC1).
     pub fn device_public_key(&self) -> [u8; 65] {
         self.device_pub
+    }
+
+    /// Override the reported `GET_VERSION` payload (without status word), and
+    /// take the target id from its first 4 bytes. Used to present a different
+    /// device state (e.g. the post-OSU "1.4.2-osu" updater) for a later step.
+    pub fn set_get_version(&mut self, raw: Vec<u8>) {
+        if let Some(b) = raw.get(..4) {
+            self.target_id = u32::from_be_bytes(b.try_into().unwrap());
+        }
+        self.get_version = Some(raw);
     }
 
     fn reply(&self, apdu: &[u8]) -> Result<Vec<u8>> {
@@ -293,7 +305,9 @@ impl KeyFileTransport {
             // stops at the model's slot count, so return an erased slot each
             // time it asks.
             ins::LIST_APPS | ins::LIST_APPS_CONTINUE => vec![0xff; 64],
-            // Reconstruct the firmware from the load stream.
+            // Reconstruct the firmware from the load stream. SET_LOAD_OFFSET
+            // gives the region's byte base; each LOAD is
+            // [in-region offset: 2 BE][data], written at base + offset.
             ins::SET_LOAD_OFFSET => {
                 if let Some(b) = args.get(..4) {
                     st.fw_offset = u32::from_be_bytes(b.try_into().unwrap()) as usize;
@@ -301,13 +315,13 @@ impl KeyFileTransport {
                 Vec::new()
             }
             ins::LOAD => {
-                let start = st.fw_offset;
-                let end = start + args.len();
-                if st.fw_buf.len() < end {
-                    st.fw_buf.resize(end, 0);
-                }
-                st.fw_buf[start..end].copy_from_slice(args);
-                st.fw_offset = end;
+                let (rel, data) = if args.len() >= 2 {
+                    (u16::from_be_bytes([args[0], args[1]]) as usize, &args[2..])
+                } else {
+                    (0, args)
+                };
+                let off = (st.fw_offset + rel) as u32;
+                st.fw_segments.push((off, data.to_vec()));
                 Vec::new()
             }
             _ => Vec::new(),
@@ -326,14 +340,80 @@ impl KeyFileTransport {
         }
     }
 
-    /// Take the firmware image reconstructed from the secure LOAD stream so
-    /// far, clearing it for the next component.
+    /// Take the firmware captured from the secure LOAD stream so far as an
+    /// Intel HEX string (addresses preserved, gaps left out), clearing it for
+    /// the next component. `None` if nothing was loaded.
     #[cfg(feature = "scp")]
-    pub fn take_firmware(&self) -> Vec<u8> {
+    pub fn take_firmware_ihex(&self) -> Option<String> {
         let mut st = self.state.borrow_mut();
         st.fw_offset = 0;
-        std::mem::take(&mut st.fw_buf)
+        let segs = std::mem::take(&mut st.fw_segments);
+        if segs.is_empty() {
+            return None;
+        }
+        Some(to_ihex(&segs))
     }
+}
+
+/// Render (offset, bytes) segments as an Intel HEX file: 16-byte data records,
+/// type-04 extended-linear-address records when the upper 16 bits change, and
+/// an EOF record. Overlapping/out-of-order writes resolve last-writer-wins.
+#[cfg(feature = "scp")]
+fn to_ihex(segments: &[(u32, Vec<u8>)]) -> String {
+    use std::collections::BTreeMap;
+    fn emit(out: &mut String, addr: u16, kind: u8, data: &[u8]) {
+        let mut sum = (data.len() as u8)
+            .wrapping_add((addr >> 8) as u8)
+            .wrapping_add(addr as u8)
+            .wrapping_add(kind);
+        for b in data {
+            sum = sum.wrapping_add(*b);
+        }
+        out.push_str(&format!(":{:02X}{:04X}{:02X}", data.len(), addr, kind));
+        for b in data {
+            out.push_str(&format!("{b:02X}"));
+        }
+        out.push_str(&format!("{:02X}\n", (!sum).wrapping_add(1)));
+    }
+    let mut map: BTreeMap<u32, u8> = BTreeMap::new();
+    for (off, data) in segments {
+        for (i, b) in data.iter().enumerate() {
+            map.insert(off + i as u32, *b);
+        }
+    }
+    let mut out = String::new();
+    let mut upper: Option<u16> = None;
+    let mut run: Vec<u8> = Vec::new();
+    let mut run_addr = 0u32;
+    let mut next: Option<u32> = None;
+    for (&addr, &b) in &map {
+        // Flush the current run on a gap, a 64 KiB page change, or 16 bytes.
+        let breaks = !run.is_empty()
+            && (next != Some(addr) || (run_addr >> 16) != (addr >> 16) || run.len() >= 16);
+        if breaks {
+            let hi = (run_addr >> 16) as u16;
+            if upper != Some(hi) {
+                emit(&mut out, 0, 0x04, &hi.to_be_bytes());
+                upper = Some(hi);
+            }
+            emit(&mut out, run_addr as u16, 0x00, &run);
+            run.clear();
+        }
+        if run.is_empty() {
+            run_addr = addr;
+        }
+        run.push(b);
+        next = Some(addr + 1);
+    }
+    if !run.is_empty() {
+        let hi = (run_addr >> 16) as u16;
+        if upper != Some(hi) {
+            emit(&mut out, 0, 0x04, &hi.to_be_bytes());
+        }
+        emit(&mut out, run_addr as u16, 0x00, &run);
+    }
+    out.push_str(":00000001FF\n");
+    out
 }
 
 impl Transport for KeyFileTransport {
@@ -510,6 +590,30 @@ mod tests {
         .unwrap();
         assert_eq!(version.target_id, 0x3110_0004);
         assert_eq!(version.raw_version, "1.6.1");
+    }
+
+    #[cfg(feature = "scp")]
+    #[test]
+    fn ihex_sparse_regions() {
+        // Two segments across a gap and a 64 KiB boundary.
+        let segs = vec![
+            (0x0000u32, vec![0xaa, 0xbb, 0xcc]),
+            (0x1_0002u32, vec![0x11, 0x22]),
+        ];
+        let hex = to_ihex(&segs);
+        let lines: Vec<&str> = hex.lines().collect();
+        // Every record: valid length, and checksum sums to 0 mod 256.
+        for l in &lines {
+            let bytes = hex::decode(&l[1..]).unwrap();
+            assert_eq!(bytes[0] as usize, bytes.len() - 5, "length byte");
+            assert_eq!(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0, "checksum");
+        }
+        // First data record carries the low segment, and there is an
+        // extended-linear-address (type 04) record for the 0x0001_xxxx page.
+        assert!(lines.iter().any(|l| l.starts_with(":03000000AABBCC")));
+        assert!(lines.iter().any(|l| l.starts_with(":020000040001")));
+        assert!(lines.iter().any(|l| l.starts_with(":0200020011 22".replace(' ', "").as_str())));
+        assert_eq!(*lines.last().unwrap(), ":00000001FF");
     }
 
     #[test]

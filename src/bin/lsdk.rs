@@ -619,6 +619,26 @@ enum FirmwareCmd {
         /// Directory to write the captured streams and plan into.
         #[arg(long)]
         out: std::path::PathBuf,
+        /// Override the emulated device's GET_VERSION response (hex, no status
+        /// word): present a different state, e.g. the post-OSU "1.4.2-osu"
+        /// updater, so the final firmware can be fetched.
+        #[arg(long)]
+        as_version: Option<String>,
+        /// Fetch one explicit catalog component instead of resolving the plan:
+        /// the firmware script name. Requires --firmware-key and --perso.
+        #[arg(long, requires = "firmware_key", requires = "perso")]
+        firmware: Option<String>,
+        #[arg(long)]
+        firmware_key: Option<String>,
+        #[arg(long)]
+        perso: Option<String>,
+        /// Target id (hex) for an explicit --firmware fetch (default: the
+        /// device's reported one).
+        #[arg(long)]
+        target_id: Option<String>,
+        /// Output basename for an explicit --firmware fetch (default: derived).
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair {
@@ -1004,12 +1024,13 @@ impl Link {
         matches!(self, Link::Hid(t) if t.info().legacy)
     }
 
-    /// Firmware reconstructed from a secure LOAD stream (emulated device only),
-    /// cleared for the next component. Empty for real transports.
-    fn take_firmware(&self) -> Vec<u8> {
+    /// Firmware reconstructed from a secure LOAD stream (emulated device only)
+    /// as Intel HEX, cleared for the next component. `None` for real transports
+    /// or when nothing was loaded.
+    fn take_firmware_ihex(&self) -> Option<String> {
         match self {
-            Link::Keyfile(t) => t.take_firmware(),
-            _ => Vec::new(),
+            Link::Keyfile(t) => t.take_firmware_ihex(),
+            _ => None,
         }
     }
 }
@@ -1062,14 +1083,13 @@ fn open_device_key(path: &std::path::Path) -> Result<Device<Link>> {
 }
 
 /// Write the firmware reconstructed from the emulated device's secure LOAD
-/// stream (if any) to `path`.
+/// stream (if any) to `path`, as Intel HEX (addresses preserved).
 fn write_firmware(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
-    let fw = dev.transport().take_firmware();
-    if fw.is_empty() {
+    let Some(hex) = dev.transport().take_firmware_ihex() else {
         return Ok(());
-    }
-    std::fs::write(path, &fw).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
-    eprintln!("> decrypted {} bytes of firmware -> {}", fw.len(), path.display());
+    };
+    std::fs::write(path, &hex).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
+    eprintln!("> firmware -> {} ({} records)", path.display(), hex.lines().count());
     Ok(())
 }
 
@@ -2224,15 +2244,56 @@ async fn run(cli: Cli) -> Result<()> {
                     osu,
                     step,
                     out,
+                    as_version,
+                    firmware,
+                    firmware_key,
+                    perso,
+                    target_id,
+                    label,
                 },
         } => {
             std::fs::create_dir_all(out)
                 .map_err(|e| Error::App(format!("{}: {e}", out.display())))?;
             let dev = match device_key {
-                Some(path) => open_device_key(path)?,
+                Some(path) => {
+                    let mut t = lsdk::transport::keyfile::KeyFileTransport::open(path)?;
+                    if let Some(v) = as_version {
+                        let raw = hex::decode(v.trim_start_matches("0x"))
+                            .map_err(|e| Error::InvalidInput(format!("--as-version: {e}")))?;
+                        t.set_get_version(raw);
+                    }
+                    apdu_log::note(format_args!("emulating a device from {}", path.display()));
+                    Device::new(Link::Keyfile(Box::new(t)))
+                }
                 None => open(&cli)?,
             };
             let os = dev.get_version().await?;
+
+            // Explicit single component: download exactly this firmware,
+            // bypassing catalog resolution (useful in OSU mode or to probe one
+            // component). Dumps the log first; the image may be encrypted.
+            if let (Some(fw), Some(key), Some(perso)) = (firmware, firmware_key, perso) {
+                let tid = match target_id {
+                    Some(s) => u32::from_str_radix(s.trim_start_matches("0x"), 16)
+                        .map_err(|e| Error::InvalidInput(format!("--target-id: {e}")))?,
+                    None => os.target_id,
+                };
+                let base = label.clone().unwrap_or_else(|| {
+                    fw.rsplit('/').next().unwrap_or("firmware").to_string()
+                });
+                let log = out.join(format!("{base}.log"));
+                apdu_log::start(&log)?;
+                apdu_log::note(format_args!("download {fw} (perso {perso}, target {tid:#x})"));
+                eprintln!("> downloading {fw} -> {}", log.display());
+                let r = manager
+                    .install_component(&dev, tid, perso, fw, key, &mut progress)
+                    .await;
+                write_firmware(&dev, &out.join(format!("{base}.hex")))?;
+                eprintln!("> stream captured to {}", log.display());
+                r?;
+                return Ok(());
+            }
+
             let update = manager
                 .firmware_update_via(&os, osu.as_deref())
                 .await?
@@ -2268,7 +2329,7 @@ async fn run(cli: Cli) -> Result<()> {
                         &mut progress,
                     )
                     .await?;
-                write_firmware(&dev, &out.join("osu.bin"))?;
+                write_firmware(&dev, &out.join("osu.hex"))?;
                 eprintln!("> OSU captured to {}", log.display());
             }
             if want_final {
@@ -2288,7 +2349,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 &mut progress,
                             )
                             .await?;
-                        write_firmware(&dev, &out.join("final.bin"))?;
+                        write_firmware(&dev, &out.join("final.hex"))?;
                         eprintln!("> final firmware captured to {}", log.display());
                     }
                     _ => eprintln!("> final firmware has no separate image to download"),
