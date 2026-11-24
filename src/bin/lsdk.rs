@@ -606,9 +606,10 @@ enum FirmwareCmd {
     /// catalog offers, so set `[device] get_version` in the key file to match
     /// the step (e.g. a 1.3.1 report yields the 1.3.1->1.4.2 OSU).
     Download {
-        /// Dumped SE key file to emulate the device from.
+        /// Dumped SE key file to emulate the device from (omit to use the
+        /// connected device, e.g. with --tcp).
         #[arg(long)]
-        device_key: std::path::PathBuf,
+        device_key: Option<std::path::PathBuf>,
         /// OS updater to use instead of the latest (e.g. 1.4.2-osu-hidden).
         #[arg(long)]
         osu: Option<String>,
@@ -1002,6 +1003,15 @@ impl Link {
     fn legacy(&self) -> bool {
         matches!(self, Link::Hid(t) if t.info().legacy)
     }
+
+    /// Firmware reconstructed from a secure LOAD stream (emulated device only),
+    /// cleared for the next component. Empty for real transports.
+    fn take_firmware(&self) -> Vec<u8> {
+        match self {
+            Link::Keyfile(t) => t.take_firmware(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl lsdk::Transport for Link {
@@ -1049,6 +1059,18 @@ fn open_device_key(path: &std::path::Path) -> Result<Device<Link>> {
     let t = lsdk::transport::keyfile::KeyFileTransport::open(path)?;
     apdu_log::note(format_args!("emulating a device from {}", path.display()));
     Ok(Device::new(Link::Keyfile(Box::new(t))))
+}
+
+/// Write the firmware reconstructed from the emulated device's secure LOAD
+/// stream (if any) to `path`.
+fn write_firmware(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
+    let fw = dev.transport().take_firmware();
+    if fw.is_empty() {
+        return Ok(());
+    }
+    std::fs::write(path, &fw).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
+    eprintln!("> decrypted {} bytes of firmware -> {}", fw.len(), path.display());
+    Ok(())
 }
 
 fn open(cli: &Cli) -> Result<Device<Link>> {
@@ -2206,7 +2228,10 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             std::fs::create_dir_all(out)
                 .map_err(|e| Error::App(format!("{}: {e}", out.display())))?;
-            let dev = open_device_key(device_key)?;
+            let dev = match device_key {
+                Some(path) => open_device_key(path)?,
+                None => open(&cli)?,
+            };
             let os = dev.get_version().await?;
             let update = manager
                 .firmware_update_via(&os, osu.as_deref())
@@ -2243,6 +2268,7 @@ async fn run(cli: Cli) -> Result<()> {
                         &mut progress,
                     )
                     .await?;
+                write_firmware(&dev, &out.join("osu.bin"))?;
                 eprintln!("> OSU captured to {}", log.display());
             }
             if want_final {
@@ -2262,6 +2288,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 &mut progress,
                             )
                             .await?;
+                        write_firmware(&dev, &out.join("final.bin"))?;
                         eprintln!("> final firmware captured to {}", log.display());
                     }
                     _ => eprintln!("> final firmware has no separate image to download"),

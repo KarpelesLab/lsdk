@@ -77,6 +77,10 @@ struct State {
     /// The opened secure channel, after `E053` (scp feature only).
     #[cfg(feature = "scp")]
     session: Option<crate::scp::Session>,
+    /// Decrypted firmware image reconstructed from the secure LOAD commands
+    /// (online install/download), honoring SET_LOAD_OFFSET.
+    fw_buf: Vec<u8>,
+    fw_offset: usize,
 }
 
 impl KeyFileTransport {
@@ -268,11 +272,12 @@ impl KeyFileTransport {
     fn secure_command(&self, data: &[u8]) -> Result<Vec<u8>> {
         use crate::scp::ins;
         let mut st = self.state.borrow_mut();
-        let session = st
+        // Decrypt the command (borrows the session only for this call).
+        let plain = st
             .session
             .as_mut()
-            .ok_or_else(|| Error::Transport("secure command before the channel is open".into()))?;
-        let plain = session.open(data)?;
+            .ok_or_else(|| Error::Transport("secure command before the channel is open".into()))?
+            .open(data)?;
         let cmd = plain.first().copied().unwrap_or(0);
         if std::env::var_os("LSDK_DEBUG").is_some() {
             eprintln!(
@@ -280,12 +285,54 @@ impl KeyFileTransport {
                 hex::encode(&plain[1.min(plain.len())..])
             );
         }
+        let args = &plain[1.min(plain.len())..];
         let reply = match cmd {
             ins::GET_VERSION => self.version_payload(),
+            // No apps installed: every slot reads back erased (all 0xff). The
+            // manager walks the slots via LIST_APPS / LIST_APPS_CONTINUE and
+            // stops at the model's slot count, so return an erased slot each
+            // time it asks.
+            ins::LIST_APPS | ins::LIST_APPS_CONTINUE => vec![0xff; 64],
+            // Reconstruct the firmware from the load stream.
+            ins::SET_LOAD_OFFSET => {
+                if let Some(b) = args.get(..4) {
+                    st.fw_offset = u32::from_be_bytes(b.try_into().unwrap()) as usize;
+                }
+                Vec::new()
+            }
+            ins::LOAD => {
+                let start = st.fw_offset;
+                let end = start + args.len();
+                if st.fw_buf.len() < end {
+                    st.fw_buf.resize(end, 0);
+                }
+                st.fw_buf[start..end].copy_from_slice(args);
+                st.fw_offset = end;
+                Vec::new()
+            }
             _ => Vec::new(),
         };
-        let sealed = session.seal(&reply);
-        Ok(ok(sealed))
+        // Commands that carry no payload (LOAD, CREATE_APP, CRC, COMMIT, ...)
+        // answer with a bare 9000 and no secure body: their response must NOT
+        // advance the shared CBC-IV chain, or the next command (especially in
+        // the fire-and-forget bulk load phase, where the HSM never reads these
+        // responses) decrypts against the wrong IV. Only data-bearing commands
+        // seal a body.
+        if reply.is_empty() {
+            Ok(ok(vec![]))
+        } else {
+            let sealed = st.session.as_mut().unwrap().seal(&reply);
+            Ok(ok(sealed))
+        }
+    }
+
+    /// Take the firmware image reconstructed from the secure LOAD stream so
+    /// far, clearing it for the next component.
+    #[cfg(feature = "scp")]
+    pub fn take_firmware(&self) -> Vec<u8> {
+        let mut st = self.state.borrow_mut();
+        st.fw_offset = 0;
+        std::mem::take(&mut st.fw_buf)
     }
 }
 
