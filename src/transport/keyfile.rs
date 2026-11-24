@@ -56,6 +56,11 @@ pub struct KeyFileTransport {
     signer_serial: [u8; 4],
     target_id: u32,
     se_version: String,
+    /// Verbatim `GET_VERSION` response payload (without status word), when the
+    /// file carries one. The HSM parses this, so for the online check it must
+    /// match what the real device returns; capture it with `lsdk info` /
+    /// `GET_VERSION` and store it as `[device] get_version = <hex>`.
+    get_version: Option<Vec<u8>>,
     /// Per-session nonces, set during the handshake.
     state: RefCell<State>,
 }
@@ -64,6 +69,14 @@ pub struct KeyFileTransport {
 struct State {
     host_nonce: [u8; 8],
     device_nonce: [u8; 8],
+    /// Host ephemeral public key, from the host's `E051 80` certificate.
+    host_eph_pub: Vec<u8>,
+    /// This session's device ephemeral private scalar, kept so the secure
+    /// channel's ECDH can be completed at `E053` (online / HSM path).
+    device_eph_secret: [u8; 32],
+    /// The opened secure channel, after `E053` (scp feature only).
+    #[cfg(feature = "scp")]
+    session: Option<crate::scp::Session>,
 }
 
 impl KeyFileTransport {
@@ -109,10 +122,21 @@ impl KeyFileTransport {
 
         let cert_sig = hex_of("signature", "der")?;
 
+        let get_version = match get("device", "get_version") {
+            Some(v) => Some(hex::decode(v.trim_start_matches("0x")).map_err(|e| {
+                Error::InvalidInput(format!("key file: device.get_version: {e}"))
+            })?),
+            None => None,
+        };
+
         let target_id = match get("device", "target_id") {
             Some(v) => u32::from_str_radix(v.trim_start_matches("0x"), 16)
                 .map_err(|e| Error::InvalidInput(format!("key file: device.target_id: {e}")))?,
-            None => DEFAULT_TARGET_ID,
+            // Fall back to the target id embedded in the captured GET_VERSION.
+            None => match get_version.as_deref() {
+                Some([a, b, c, d, ..]) => u32::from_be_bytes([*a, *b, *c, *d]),
+                _ => DEFAULT_TARGET_ID,
+            },
         };
         let se_version = get("device", "se_version")
             .cloned()
@@ -131,6 +155,7 @@ impl KeyFileTransport {
             signer_serial,
             target_id,
             se_version,
+            get_version,
             state: RefCell::new(State::default()),
         })
     }
@@ -162,8 +187,17 @@ impl KeyFileTransport {
                 out.extend_from_slice(&st.device_nonce);
                 Ok(ok(out))
             }
-            // MUTUAL_AUTHENTICATE host certificates: accepted (no channel is opened).
-            (0xe0, 0x51, _) => Ok(ok(vec![])),
+            // Host root certificate: accepted (we do not verify the manager).
+            (0xe0, 0x51, 0x00) => Ok(ok(vec![])),
+            // Host ephemeral certificate: capture the host ephemeral public key
+            // (needed to complete the secure channel's ECDH).
+            (0xe0, 0x51, 0x80) => {
+                // host_certificate = len(pub) || pub || len(sig) || sig.
+                if let Some(pk) = data.first().and_then(|&len| data.get(1..1 + len as usize)) {
+                    self.state.borrow_mut().host_eph_pub = pk.to_vec();
+                }
+                Ok(ok(vec![]))
+            }
             // GET_CERTIFICATE.
             (0xe0, 0x52, 0x00) => {
                 // Device factory certificate: header || device pubkey || issuer signature.
@@ -173,13 +207,18 @@ impl KeyFileTransport {
                 Ok(ok(cert))
             }
             (0xe0, 0x52, 0x80) => {
-                // Ephemeral key certified by the device key (live proof of possession).
-                let st = self.state.borrow();
+                // Ephemeral key certified by the device key (live proof of
+                // possession). Keep its private scalar for the channel ECDH.
                 let eph = random_key()?;
                 let eph_pub = eph.public_key().to_sec1();
+                let (device_nonce, host_nonce) = {
+                    let mut st = self.state.borrow_mut();
+                    st.device_eph_secret = eph.to_bytes();
+                    (st.device_nonce, st.host_nonce)
+                };
                 let mut signed = vec![0x12u8];
-                signed.extend_from_slice(&st.device_nonce);
-                signed.extend_from_slice(&st.host_nonce);
+                signed.extend_from_slice(&device_nonce);
+                signed.extend_from_slice(&host_nonce);
                 signed.extend_from_slice(&eph_pub);
                 let sig = self.device.sign(&signed)?;
                 let mut cert = lv(&[]); // empty header
@@ -187,15 +226,65 @@ impl KeyFileTransport {
                 cert.extend(lv(&sig));
                 Ok(ok(cert))
             }
+            // OPEN_SECURE_CHANNEL: commit the ECDH channel (online / HSM path).
+            #[cfg(feature = "scp")]
+            (0xe0, 0x53, _) => {
+                let mut st = self.state.borrow_mut();
+                let secret = st.device_eph_secret;
+                let host_eph = st.host_eph_pub.clone();
+                st.session = Some(crate::scp::device_session(&secret, &host_eph, self.target_id)?);
+                Ok(ok(vec![]))
+            }
+            // Secure command: decrypt, run, re-encrypt (online / HSM path).
+            #[cfg(feature = "scp")]
+            (0xe0, 0x00, _) => self.secure_command(data),
             _ => Ok(sw(StatusWord::INS_NOT_SUPPORTED)),
         }
     }
 
     fn get_version(&self) -> Vec<u8> {
+        ok(self.version_payload())
+    }
+
+    /// `GET_VERSION` payload (without the status word). Prefers a verbatim
+    /// response captured from the real device; otherwise synthesizes a minimal
+    /// one (enough for the offline check, but not necessarily for the HSM).
+    fn version_payload(&self) -> Vec<u8> {
+        if let Some(raw) = &self.get_version {
+            return raw.clone();
+        }
         let mut out = self.target_id.to_be_bytes().to_vec();
         out.extend(lv(self.se_version.as_bytes()));
         out.extend(lv(&[0u8; 4])); // seFlags
-        ok(out)
+        out
+    }
+
+    /// Handle a secure-channel command (`E000`): decrypt it, run it, and
+    /// return the encrypted response. Only the commands the HSM genuine check
+    /// needs are implemented; anything else returns an empty response so the
+    /// unexpected instruction is visible in the logs rather than silently
+    /// faked.
+    #[cfg(feature = "scp")]
+    fn secure_command(&self, data: &[u8]) -> Result<Vec<u8>> {
+        use crate::scp::ins;
+        let mut st = self.state.borrow_mut();
+        let session = st
+            .session
+            .as_mut()
+            .ok_or_else(|| Error::Transport("secure command before the channel is open".into()))?;
+        let plain = session.open(data)?;
+        let cmd = plain.first().copied().unwrap_or(0);
+        let reply = match cmd {
+            ins::GET_VERSION => self.version_payload(),
+            other => {
+                if std::env::var_os("LSDK_DEBUG").is_some() {
+                    eprintln!("keyfile: unhandled secure command 0x{other:02x}");
+                }
+                Vec::new()
+            }
+        };
+        let sealed = session.seal(&reply);
+        Ok(ok(sealed))
     }
 }
 
@@ -340,6 +429,39 @@ mod tests {
         assert!(!att.genuine);
         assert!(att.issuer.is_none());
         assert!(att.proof_of_possession);
+    }
+
+    /// The emulated device completes a full SCP secure channel (the online /
+    /// HSM path): a host SecureChannel opens against it and a secure command
+    /// round-trips, which exercises the ECDH and the wrap/unwrap mirror.
+    #[cfg(feature = "scp")]
+    #[test]
+    fn opens_secure_channel() {
+        use crate::scp::SecureChannel;
+
+        let device = RootKey::from_bytes(&[7u8; 32]).unwrap();
+        let issuer = RootKey::from_bytes(&[9u8; 32]).unwrap();
+        let header = [0x01u8, 0x02];
+        let mut signed = vec![0x02u8];
+        signed.extend_from_slice(&header);
+        signed.extend_from_slice(&device.public_key());
+        let cert_sig = issuer.sign(&signed).unwrap();
+        let ini = format!(
+            "[device_key]\nd = {}\n[certificate]\nheader = {}\n[signature]\nder = {}\n[device]\ntarget_id = 0x31100004\nse_version = 1.6.1\n",
+            hex::encode(device.to_bytes()),
+            hex::encode(header),
+            hex::encode(&cert_sig),
+        );
+        let dev = Device::new(KeyFileTransport::parse(&ini).unwrap());
+        let host = RootKey::from_bytes(&[3u8; 32]).unwrap();
+
+        let version = block_on(async {
+            let mut ch = SecureChannel::open(&dev, &host, &mut |_| {}).await?;
+            ch.get_version().await
+        })
+        .unwrap();
+        assert_eq!(version.target_id, 0x3110_0004);
+        assert_eq!(version.raw_version, "1.6.1");
     }
 
     #[test]

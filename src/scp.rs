@@ -161,7 +161,7 @@ pub enum ScpMode {
     Recover,
 }
 
-enum Session {
+pub(crate) enum Session {
     Default {
         enc: Aes128,
         mac: Aes128,
@@ -300,6 +300,126 @@ fn cbc_decrypt(enc: &Aes128, iv: &mut [u8; 16], data: &[u8]) -> Result<Vec<u8>> 
 fn xor16(a: &mut [u8; 16], b: &[u8]) {
     for (x, y) in a.iter_mut().zip(b) {
         *x ^= y;
+    }
+}
+
+impl Session {
+    /// Encrypt (and MAC) a plaintext for the channel, advancing the IV chain.
+    /// Host and device share one continuous chain, so this is used by both
+    /// ends: the host to wrap a command, the emulated device to wrap a reply.
+    pub(crate) fn seal(&mut self, plain: &[u8]) -> Vec<u8> {
+        let (enc, mac, enc_iv, mac_iv) = match self {
+            Session::Recover { siv } => return siv.seal(&[], plain),
+            Session::V2 { enc, iv } => return cbc_encrypt(enc, iv, plain),
+            Session::Default {
+                enc,
+                mac,
+                enc_iv,
+                mac_iv,
+            } => (enc, mac, enc_iv, mac_iv),
+        };
+        let mut data = plain.to_vec();
+        data.push(0x80);
+        while !data.len().is_multiple_of(16) {
+            data.push(0);
+        }
+        // CBC encrypt, chaining enc_iv.
+        for chunk in data.chunks_mut(16) {
+            let mut block: [u8; 16] = chunk.try_into().unwrap();
+            xor16(&mut block, enc_iv);
+            enc.encrypt_block(&mut block);
+            chunk.copy_from_slice(&block);
+            *enc_iv = block;
+        }
+        // CBC-MAC over the ciphertext, chaining mac_iv.
+        for chunk in data.chunks(16) {
+            let mut block = *mac_iv;
+            xor16(&mut block, chunk);
+            mac.encrypt_block(&mut block);
+            *mac_iv = block;
+        }
+        data.extend_from_slice(&mac_iv[16 - MAC_LEN..]);
+        data
+    }
+
+    /// Verify and decrypt a channel message, advancing the IV chain.
+    pub(crate) fn open(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (enc, mac, enc_iv, mac_iv) = match self {
+            Session::V2 { enc, iv } => return cbc_decrypt(enc, iv, data),
+            Session::Recover { siv } => {
+                return siv
+                    .open(&[], data)
+                    .map_err(|_| Error::InvalidResponse("secure channel tag mismatch".into()));
+            }
+            Session::Default {
+                enc,
+                mac,
+                enc_iv,
+                mac_iv,
+            } => (enc, mac, enc_iv, mac_iv),
+        };
+        if data.len() < MAC_LEN + 16 || !(data.len() - MAC_LEN).is_multiple_of(16) {
+            return Err(Error::InvalidResponse("bad secure response length".into()));
+        }
+        let (body, tag) = data.split_at(data.len() - MAC_LEN);
+        for chunk in body.chunks(16) {
+            let mut block = *mac_iv;
+            xor16(&mut block, chunk);
+            mac.encrypt_block(&mut block);
+            *mac_iv = block;
+        }
+        if mac_iv[16 - MAC_LEN..] != *tag {
+            return Err(Error::InvalidResponse("secure channel MAC mismatch".into()));
+        }
+        let mut out = Vec::with_capacity(body.len());
+        for chunk in body.chunks(16) {
+            let c: [u8; 16] = chunk.try_into().unwrap();
+            let mut block = c;
+            enc.decrypt_block(&mut block);
+            xor16(&mut block, enc_iv);
+            *enc_iv = c;
+            out.extend_from_slice(&block);
+        }
+        let end = out
+            .iter()
+            .rposition(|b| *b == 0x80)
+            .ok_or_else(|| Error::InvalidResponse("bad padding".into()))?;
+        if out[end + 1..].iter().any(|b| *b != 0) {
+            return Err(Error::InvalidResponse("bad padding".into()));
+        }
+        out.truncate(end);
+        Ok(out)
+    }
+}
+
+/// Build the session keys from the *device* side of the handshake: the device
+/// ephemeral private scalar and the host ephemeral public key (mirror of what
+/// the host computes in [`SecureChannel::open_with`]). Used by the key-file
+/// virtual device; Recover mode is not needed there.
+pub(crate) fn device_session(
+    device_eph_secret: &[u8; 32],
+    host_eph_pub: &[u8],
+    target_id: u32,
+) -> Result<Session> {
+    let scalar = Scalar::from_bytes_be(device_eph_secret)
+        .map_err(|_| Error::App("bad ephemeral key".into()))?;
+    let secret = ecdh_secret(&RootKeyScalar(scalar), host_eph_pub)?;
+    if is_pre_1_4(target_id) {
+        let key: [u8; 16] = secret[..16].try_into().unwrap();
+        Ok(Session::V2 {
+            enc: Aes128::new(&key),
+            iv: [0; 16],
+        })
+    } else {
+        Ok(Session::Default {
+            enc: Aes128::new(&derive_key(&secret, 0)?),
+            mac: Aes128::new(&derive_key(&secret, 1)?),
+            enc_iv: [0; 16],
+            mac_iv: [0; 16],
+        })
     }
 }
 
@@ -501,89 +621,11 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
     }
 
     fn wrap(&mut self, plain: &[u8]) -> Vec<u8> {
-        let (enc, mac, enc_iv, mac_iv) = match &mut self.session {
-            Session::Recover { siv } => return siv.seal(&[], plain),
-            Session::V2 { enc, iv } => return cbc_encrypt(enc, iv, plain),
-            Session::Default {
-                enc,
-                mac,
-                enc_iv,
-                mac_iv,
-            } => (enc, mac, enc_iv, mac_iv),
-        };
-        let mut data = plain.to_vec();
-        data.push(0x80);
-        while !data.len().is_multiple_of(16) {
-            data.push(0);
-        }
-        // CBC encrypt, chaining enc_iv.
-        for chunk in data.chunks_mut(16) {
-            let mut block: [u8; 16] = chunk.try_into().unwrap();
-            xor16(&mut block, enc_iv);
-            enc.encrypt_block(&mut block);
-            chunk.copy_from_slice(&block);
-            *enc_iv = block;
-        }
-        // CBC-MAC over the ciphertext, chaining mac_iv.
-        for chunk in data.chunks(16) {
-            let mut block = *mac_iv;
-            xor16(&mut block, chunk);
-            mac.encrypt_block(&mut block);
-            *mac_iv = block;
-        }
-        data.extend_from_slice(&mac_iv[16 - MAC_LEN..]);
-        data
+        self.session.seal(plain)
     }
 
     fn unwrap(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        if data.is_empty() {
-            return Ok(Vec::new());
-        }
-        let (enc, mac, enc_iv, mac_iv) = match &mut self.session {
-            Session::V2 { enc, iv } => return cbc_decrypt(enc, iv, data),
-            Session::Recover { siv } => {
-                return siv
-                    .open(&[], data)
-                    .map_err(|_| Error::InvalidResponse("secure channel tag mismatch".into()));
-            }
-            Session::Default {
-                enc,
-                mac,
-                enc_iv,
-                mac_iv,
-            } => (enc, mac, enc_iv, mac_iv),
-        };
-        if data.len() < MAC_LEN + 16 || !(data.len() - MAC_LEN).is_multiple_of(16) {
-            return Err(Error::InvalidResponse("bad secure response length".into()));
-        }
-        let (body, tag) = data.split_at(data.len() - MAC_LEN);
-        for chunk in body.chunks(16) {
-            let mut block = *mac_iv;
-            xor16(&mut block, chunk);
-            mac.encrypt_block(&mut block);
-            *mac_iv = block;
-        }
-        if mac_iv[16 - MAC_LEN..] != *tag {
-            return Err(Error::InvalidResponse("secure channel MAC mismatch".into()));
-        }
-        let mut out = Vec::with_capacity(body.len());
-        for chunk in body.chunks(16) {
-            let c: [u8; 16] = chunk.try_into().unwrap();
-            let mut block = c;
-            enc.decrypt_block(&mut block);
-            xor16(&mut block, enc_iv);
-            *enc_iv = c;
-            out.extend_from_slice(&block);
-        }
-        let end = out
-            .iter()
-            .rposition(|b| *b == 0x80)
-            .ok_or_else(|| Error::InvalidResponse("bad padding".into()))?;
-        if out[end + 1..].iter().any(|b| *b != 0) {
-            return Err(Error::InvalidResponse("bad padding".into()));
-        }
-        out.truncate(end);
-        Ok(out)
+        self.session.open(data)
     }
 
     /// Send a secure command (`ins` + `data`), returning the decrypted response.

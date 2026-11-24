@@ -79,10 +79,11 @@ enum Cmd {
         /// else a random key).
         #[arg(long, requires = "offline")]
         key: Option<std::path::PathBuf>,
-        /// Run --offline against a dumped SE attestation key instead of a
-        /// connected device (an emulated "virtual device" from that file).
-        /// The file holds private keys: keep it safe.
-        #[arg(long, requires = "offline")]
+        /// Run the check against a dumped SE attestation key instead of a
+        /// connected device (an emulated "virtual device" from that file),
+        /// either --offline or online through the vendor HSM. The file holds
+        /// private keys: keep it safe.
+        #[arg(long)]
         device_key: Option<std::path::PathBuf>,
         /// Extra trusted issuer public key (hex, uncompressed, or a file
         /// holding it), checked after the pinned vendor keys; repeatable.
@@ -1563,6 +1564,22 @@ async fn run(cli: Cli) -> Result<()> {
                 eprintln!("note: {GENUINE_NOTE}");
             }
             if !att.genuine {
+                std::process::exit(2);
+            }
+        }
+        Cmd::Genuine {
+            device_key: Some(path),
+            ..
+        } => {
+            // Online check against an emulated device (through the vendor HSM).
+            eprintln!("> emulating a device from {} (contacting the vendor HSM)", path.display());
+            let dev = Device::new(lsdk::transport::keyfile::KeyFileTransport::open(path)?);
+            let ok = manager.genuine_check(&dev, &mut progress).await?;
+            println!("{}", if ok { "genuine" } else { "NOT GENUINE" });
+            if ok {
+                eprintln!("note: {GENUINE_NOTE}");
+            }
+            if !ok {
                 std::process::exit(2);
             }
         }
