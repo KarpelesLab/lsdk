@@ -63,6 +63,10 @@ pub struct KeyFileTransport {
     get_version: Option<Vec<u8>>,
     /// Per-session nonces, set during the handshake.
     state: RefCell<State>,
+    /// Session trace: every wire APDU (`>`/`<`, encrypted), the decrypted
+    /// secure commands (`cmd`/`rsp`), and the session's ephemeral key and
+    /// nonces (`#`), so the encrypted wire can be re-derived/verified offline.
+    trace: RefCell<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -163,6 +167,7 @@ impl KeyFileTransport {
             se_version,
             get_version,
             state: RefCell::new(State::default()),
+            trace: RefCell::new(Vec::new()),
         })
     }
 
@@ -181,7 +186,24 @@ impl KeyFileTransport {
         self.get_version = Some(raw);
     }
 
+    fn log(&self, line: String) {
+        self.trace.borrow_mut().push(line);
+    }
+
+    /// Process one APDU, logging the wire request and response (both
+    /// directions, encrypted as sent); secure commands log their decrypted
+    /// form, and the handshake logs the ephemeral key, in between.
     fn reply(&self, apdu: &[u8]) -> Result<Vec<u8>> {
+        self.log(format!("> {}", hex::encode(apdu)));
+        let r = self.reply_inner(apdu);
+        match &r {
+            Ok(resp) => self.log(format!("< {}", hex::encode(resp))),
+            Err(e) => self.log(format!("! {e}")),
+        }
+        r
+    }
+
+    fn reply_inner(&self, apdu: &[u8]) -> Result<Vec<u8>> {
         if apdu.len() < 4 {
             return Err(Error::Transport("short APDU".into()));
         }
@@ -210,6 +232,7 @@ impl KeyFileTransport {
             (0xe0, 0x51, 0x80) => {
                 // host_certificate = len(pub) || pub || len(sig) || sig.
                 if let Some(pk) = data.first().and_then(|&len| data.get(1..1 + len as usize)) {
+                    self.log(format!("# host_ephemeral_pub {}", hex::encode(pk)));
                     self.state.borrow_mut().host_eph_pub = pk.to_vec();
                 }
                 Ok(ok(vec![]))
@@ -232,6 +255,18 @@ impl KeyFileTransport {
                     st.device_eph_secret = eph.to_bytes();
                     (st.device_nonce, st.host_nonce)
                 };
+                // Log the session's ephemeral key + nonces so the encrypted
+                // wire trace can be re-derived / decrypted offline.
+                self.log(format!(
+                    "# device_ephemeral_priv {} device_ephemeral_pub {}",
+                    hex::encode(eph.to_bytes()),
+                    hex::encode(eph_pub)
+                ));
+                self.log(format!(
+                    "# device_nonce {} host_nonce {}",
+                    hex::encode(device_nonce),
+                    hex::encode(host_nonce)
+                ));
                 let mut signed = vec![0x12u8];
                 signed.extend_from_slice(&device_nonce);
                 signed.extend_from_slice(&host_nonce);
@@ -291,13 +326,8 @@ impl KeyFileTransport {
             .ok_or_else(|| Error::Transport("secure command before the channel is open".into()))?
             .open(data)?;
         let cmd = plain.first().copied().unwrap_or(0);
-        if std::env::var_os("LSDK_DEBUG").is_some() {
-            eprintln!(
-                "keyfile: secure command 0x{cmd:02x} data={}",
-                hex::encode(&plain[1.min(plain.len())..])
-            );
-        }
         let args = &plain[1.min(plain.len())..];
+        self.log(format!("  cmd {cmd:02x} {}", hex::encode(args)));
         let reply = match cmd {
             ins::GET_VERSION => self.version_payload(),
             // No apps installed: every slot reads back erased (all 0xff). The
@@ -326,6 +356,7 @@ impl KeyFileTransport {
             }
             _ => Vec::new(),
         };
+        self.log(format!("  rsp {}", hex::encode(&reply)));
         // Commands that carry no payload (LOAD, CREATE_APP, CRC, COMMIT, ...)
         // answer with a bare 9000 and no secure body: their response must NOT
         // advance the shared CBC-IV chain, or the next command (especially in
@@ -352,6 +383,18 @@ impl KeyFileTransport {
             return None;
         }
         Some(to_ihex(&segs))
+    }
+
+    /// Take the session trace (wire APDUs, decrypted secure commands, and the
+    /// ephemeral key / nonces), clearing it for the next component. `None` if
+    /// nothing was traced.
+    pub fn take_trace(&self) -> Option<String> {
+        let lines = std::mem::take(&mut *self.trace.borrow_mut());
+        if lines.is_empty() {
+            None
+        } else {
+            Some(lines.join("\n") + "\n")
+        }
     }
 }
 

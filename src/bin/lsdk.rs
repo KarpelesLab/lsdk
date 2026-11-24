@@ -1033,6 +1033,15 @@ impl Link {
             _ => None,
         }
     }
+
+    /// Session trace from an emulated device (wire + decrypted + ephemeral key),
+    /// cleared for the next component. `None` for real transports.
+    fn take_trace(&self) -> Option<String> {
+        match self {
+            Link::Keyfile(t) => t.take_trace(),
+            _ => None,
+        }
+    }
 }
 
 impl lsdk::Transport for Link {
@@ -1090,6 +1099,16 @@ fn write_firmware(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
     };
     std::fs::write(path, &hex).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
     eprintln!("> firmware -> {} ({} records)", path.display(), hex.lines().count());
+    Ok(())
+}
+
+/// Write the emulated device's session trace (wire APDUs, decrypted secure
+/// commands, and the ephemeral key / nonces) to `path`. No-op for a real
+/// transport (those are captured by `apdu_log` instead).
+fn write_log(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
+    if let Some(trace) = dev.transport().take_trace() {
+        std::fs::write(path, &trace).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
+    }
     Ok(())
 }
 
@@ -2267,6 +2286,9 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 None => open(&cli)?,
             };
+            // Emulated device logs a decrypted trace itself; a real device is
+            // captured through apdu_log (wire only).
+            let emulated = device_key.is_some();
             let os = dev.get_version().await?;
 
             // Explicit single component: download exactly this firmware,
@@ -2282,13 +2304,16 @@ async fn run(cli: Cli) -> Result<()> {
                     fw.rsplit('/').next().unwrap_or("firmware").to_string()
                 });
                 let log = out.join(format!("{base}.log"));
-                apdu_log::start(&log)?;
+                if !emulated {
+                    apdu_log::start(&log)?;
+                }
                 apdu_log::note(format_args!("download {fw} (perso {perso}, target {tid:#x})"));
                 eprintln!("> downloading {fw} -> {}", log.display());
                 let r = manager
                     .install_component(&dev, tid, perso, fw, key, &mut progress)
                     .await;
                 write_firmware(&dev, &out.join(format!("{base}.hex")))?;
+                write_log(&dev, &log)?;
                 eprintln!("> stream captured to {}", log.display());
                 r?;
                 return Ok(());
@@ -2316,7 +2341,9 @@ async fn run(cli: Cli) -> Result<()> {
 
             if want_osu {
                 let log = out.join("osu.log");
-                apdu_log::start(&log)?;
+                if !emulated {
+                    apdu_log::start(&log)?;
+                }
                 apdu_log::note(format_args!("download OSU {}", update.osu.firmware));
                 eprintln!("> downloading OSU -> {}", log.display());
                 manager
@@ -2330,6 +2357,7 @@ async fn run(cli: Cli) -> Result<()> {
                     )
                     .await?;
                 write_firmware(&dev, &out.join("osu.hex"))?;
+                write_log(&dev, &log)?;
                 eprintln!("> OSU captured to {}", log.display());
             }
             if want_final {
@@ -2348,7 +2376,9 @@ async fn run(cli: Cli) -> Result<()> {
                 match (final_fw, final_key) {
                     (Some(fw), Some(key)) => {
                         let log = out.join("final.log");
-                        apdu_log::start(&log)?;
+                        if !emulated {
+                            apdu_log::start(&log)?;
+                        }
                         apdu_log::note(format_args!("download final {fw}"));
                         eprintln!("> downloading final firmware -> {}", log.display());
                         manager
@@ -2362,6 +2392,7 @@ async fn run(cli: Cli) -> Result<()> {
                             )
                             .await?;
                         write_firmware(&dev, &out.join("final.hex"))?;
+                        write_log(&dev, &log)?;
                         eprintln!("> final firmware captured to {}", log.display());
                     }
                     _ => eprintln!("> final firmware has no separate image to download"),
