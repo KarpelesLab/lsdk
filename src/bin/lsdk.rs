@@ -79,6 +79,11 @@ enum Cmd {
         /// else a random key).
         #[arg(long, requires = "offline")]
         key: Option<std::path::PathBuf>,
+        /// Run --offline against a dumped SE attestation key instead of a
+        /// connected device (an emulated "virtual device" from that file).
+        /// The file holds private keys: keep it safe.
+        #[arg(long, requires = "offline")]
+        device_key: Option<std::path::PathBuf>,
         /// Extra trusted issuer public key (hex, uncompressed, or a file
         /// holding it), checked after the pinned vendor keys; repeatable.
         #[arg(long = "issuer-key", requires = "offline")]
@@ -982,6 +987,26 @@ impl lsdk::Transport for Link {
     }
 }
 
+/// Run the offline genuine check, reporting its progress on stderr. Works
+/// against any transport (a real device, or an emulated one from a key file).
+async fn run_offline_genuine<T: lsdk::Transport>(
+    device: &Device<T>,
+    root: &lsdk::attestation::RootKey,
+    issuers: &[(String, Vec<u8>)],
+) -> Result<lsdk::attestation::Attestation> {
+    lsdk::attestation::offline_genuine_check(device, root, issuers, &mut |ev| {
+        use lsdk::attestation::AttestationEvent::*;
+        match ev {
+            PermissionRequested { host_public_key } => eprintln!(
+                "> the device shows this manager key, check it matches, then allow:\n  {host_public_key}"
+            ),
+            PermissionGranted => eprintln!("> allowed"),
+            Attesting => eprintln!("> device is signing its attestation..."),
+        }
+    })
+    .await
+}
+
 fn open(cli: &Cli) -> Result<Device<Link>> {
     if let Some(addr) = &cli.tcp {
         let t = TcpTransport::connect(addr.as_str())?;
@@ -1493,6 +1518,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Genuine {
             offline: true,
             key,
+            device_key,
             issuer_keys,
             no_default_issuer,
         } => {
@@ -1517,17 +1543,13 @@ async fn run(cli: Cli) -> Result<()> {
                 issuers.push((n.clone(), parse(&n, k)?));
             }
             let root = root_key(key.as_ref())?;
-            let att = lsdk::attestation::offline_genuine_check(&open(&cli)?, &root, &issuers, &mut |ev| {
-                use lsdk::attestation::AttestationEvent::*;
-                match ev {
-                    PermissionRequested { host_public_key } => eprintln!(
-                        "> the device shows this manager key, check it matches, then allow:\n  {host_public_key}"
-                    ),
-                    PermissionGranted => eprintln!("> allowed"),
-                    Attesting => eprintln!("> device is signing its attestation..."),
-                }
-            })
-            .await?;
+            let att = if let Some(path) = device_key {
+                let dev = Device::new(lsdk::transport::keyfile::KeyFileTransport::open(path)?);
+                eprintln!("> emulating a device from {}", path.display());
+                run_offline_genuine(&dev, &root, &issuers).await?
+            } else {
+                run_offline_genuine(&open(&cli)?, &root, &issuers).await?
+            };
             print(&att);
             println!(
                 "{}",

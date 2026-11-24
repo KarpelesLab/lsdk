@@ -12,6 +12,9 @@ pub mod webhid;
 
 pub mod mock;
 
+#[cfg(all(feature = "attestation", not(target_arch = "wasm32")))]
+pub mod keyfile;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tcp;
 
