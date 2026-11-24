@@ -1098,7 +1098,11 @@ fn write_firmware(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
         return Ok(());
     };
     std::fs::write(path, &hex).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
-    eprintln!("> firmware -> {} ({} records)", path.display(), hex.lines().count());
+    eprintln!(
+        "> firmware -> {} ({} records)",
+        path.display(),
+        hex.lines().count()
+    );
     Ok(())
 }
 
@@ -1675,8 +1679,13 @@ async fn run(cli: Cli) -> Result<()> {
             ..
         } => {
             // Online check against an emulated device (through the vendor HSM).
-            eprintln!("> emulating a device from {} (contacting the vendor HSM)", path.display());
-            let ok = manager.genuine_check(&open_device_key(path)?, &mut progress).await?;
+            eprintln!(
+                "> emulating a device from {} (contacting the vendor HSM)",
+                path.display()
+            );
+            let ok = manager
+                .genuine_check(&open_device_key(path)?, &mut progress)
+                .await?;
             println!("{}", if ok { "genuine" } else { "NOT GENUINE" });
             if ok {
                 eprintln!("note: {GENUINE_NOTE}");
@@ -2300,14 +2309,16 @@ async fn run(cli: Cli) -> Result<()> {
                         .map_err(|e| Error::InvalidInput(format!("--target-id: {e}")))?,
                     None => os.target_id,
                 };
-                let base = label.clone().unwrap_or_else(|| {
-                    fw.rsplit('/').next().unwrap_or("firmware").to_string()
-                });
+                let base = label
+                    .clone()
+                    .unwrap_or_else(|| fw.rsplit('/').next().unwrap_or("firmware").to_string());
                 let log = out.join(format!("{base}.log"));
                 if !emulated {
                     apdu_log::start(&log)?;
                 }
-                apdu_log::note(format_args!("download {fw} (perso {perso}, target {tid:#x})"));
+                apdu_log::note(format_args!(
+                    "download {fw} (perso {perso}, target {tid:#x})"
+                ));
                 eprintln!("> downloading {fw} -> {}", log.display());
                 let r = manager
                     .install_component(&dev, tid, perso, fw, key, &mut progress)

@@ -102,9 +102,8 @@ impl KeyFileTransport {
         let ini = parse_ini(text);
         let get = |sec: &str, key: &str| ini.get(&(sec.to_string(), key.to_string()));
         let hex_of = |sec: &str, key: &str| -> Result<Vec<u8>> {
-            let v = get(sec, key).ok_or_else(|| {
-                Error::InvalidInput(format!("key file: missing [{sec}] {key}"))
-            })?;
+            let v = get(sec, key)
+                .ok_or_else(|| Error::InvalidInput(format!("key file: missing [{sec}] {key}")))?;
             hex::decode(v.trim_start_matches("0x"))
                 .map_err(|e| Error::InvalidInput(format!("key file [{sec}] {key}: {e}")))
         };
@@ -118,9 +117,8 @@ impl KeyFileTransport {
         // signed over. Accept it under [certificate] header (preferred) or the
         // older [header] cert spelling.
         let cert_header = match get("certificate", "header").or_else(|| get("header", "cert")) {
-            Some(v) => hex::decode(v.trim_start_matches("0x")).map_err(|e| {
-                Error::InvalidInput(format!("key file: certificate.header: {e}"))
-            })?,
+            Some(v) => hex::decode(v.trim_start_matches("0x"))
+                .map_err(|e| Error::InvalidInput(format!("key file: certificate.header: {e}")))?,
             None => {
                 return Err(Error::InvalidInput(
                     "key file: missing [certificate] header (the device certificate header; \
@@ -132,12 +130,13 @@ impl KeyFileTransport {
 
         let cert_sig = hex_of("signature", "der")?;
 
-        let get_version = match get("device", "get_version") {
-            Some(v) => Some(hex::decode(v.trim_start_matches("0x")).map_err(|e| {
-                Error::InvalidInput(format!("key file: device.get_version: {e}"))
-            })?),
-            None => None,
-        };
+        let get_version =
+            match get("device", "get_version") {
+                Some(v) => Some(hex::decode(v.trim_start_matches("0x")).map_err(|e| {
+                    Error::InvalidInput(format!("key file: device.get_version: {e}"))
+                })?),
+                None => None,
+            };
 
         let target_id = match get("device", "target_id") {
             Some(v) => u32::from_str_radix(v.trim_start_matches("0x"), 16)
@@ -219,7 +218,11 @@ impl KeyFileTransport {
             // INITIALIZE_AUTHENTICATION: take the host nonce, pick a device nonce.
             (0xe0, 0x50, _) => {
                 let mut st = self.state.borrow_mut();
-                st.host_nonce = data.get(..8).unwrap_or(&[0u8; 8]).try_into().unwrap_or([0; 8]);
+                st.host_nonce = data
+                    .get(..8)
+                    .unwrap_or(&[0u8; 8])
+                    .try_into()
+                    .unwrap_or([0; 8]);
                 rand_bytes(&mut st.device_nonce)?;
                 let mut out = self.signer_serial.to_vec();
                 out.extend_from_slice(&st.device_nonce);
@@ -283,7 +286,11 @@ impl KeyFileTransport {
                 let mut st = self.state.borrow_mut();
                 let secret = st.device_eph_secret;
                 let host_eph = st.host_eph_pub.clone();
-                st.session = Some(crate::scp::device_session(&secret, &host_eph, self.target_id)?);
+                st.session = Some(crate::scp::device_session(
+                    &secret,
+                    &host_eph,
+                    self.target_id,
+                )?);
                 Ok(ok(vec![]))
             }
             // Secure command: decrypt, run, re-encrypt (online / HSM path).
@@ -649,13 +656,21 @@ mod tests {
         for l in &lines {
             let bytes = hex::decode(&l[1..]).unwrap();
             assert_eq!(bytes[0] as usize, bytes.len() - 5, "length byte");
-            assert_eq!(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0, "checksum");
+            assert_eq!(
+                bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)),
+                0,
+                "checksum"
+            );
         }
         // First data record carries the low segment, and there is an
         // extended-linear-address (type 04) record for the 0x0001_xxxx page.
         assert!(lines.iter().any(|l| l.starts_with(":03000000AABBCC")));
         assert!(lines.iter().any(|l| l.starts_with(":020000040001")));
-        assert!(lines.iter().any(|l| l.starts_with(":0200020011 22".replace(' ', "").as_str())));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(":0200020011 22".replace(' ', "").as_str()))
+        );
         assert_eq!(*lines.last().unwrap(), ":00000001FF");
     }
 
