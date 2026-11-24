@@ -2333,7 +2333,19 @@ async fn run(cli: Cli) -> Result<()> {
                 eprintln!("> OSU captured to {}", log.display());
             }
             if want_final {
-                match (&update.final_firmware.firmware, &update.final_firmware.firmware_key) {
+                // A single-image update (e.g. Nano S 2.x, Nano X 2.2.3) has no
+                // separate final image: the catalog gives empty firmware names.
+                let final_fw = update
+                    .final_firmware
+                    .firmware
+                    .as_deref()
+                    .filter(|s| !s.is_empty());
+                let final_key = update
+                    .final_firmware
+                    .firmware_key
+                    .as_deref()
+                    .filter(|s| !s.is_empty());
+                match (final_fw, final_key) {
                     (Some(fw), Some(key)) => {
                         let log = out.join("final.log");
                         apdu_log::start(&log)?;
