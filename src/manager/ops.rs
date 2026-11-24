@@ -635,6 +635,42 @@ impl Manager {
         }
     }
 
+    /// Run a vendor `/install` session for an explicit firmware component
+    /// (`perso` / `firmware` / `firmwareKey` from the catalog) and relay it to
+    /// `device`, without any device-state precondition. The firmware is
+    /// streamed from the HSM, so with APDU logging (or an emulated device)
+    /// this captures ("downloads") the firmware without flashing real
+    /// hardware. The device reboot at the end (lost link) is treated as
+    /// success.
+    pub async fn install_component<T: Transport>(
+        &self,
+        device: &Device<T>,
+        target_id: u32,
+        perso: &str,
+        firmware: &str,
+        firmware_key: &str,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<()> {
+        on_event(HsmEvent::Installing {
+            name: firmware.to_string(),
+        });
+        let target = target_id.to_string();
+        let url = hsm::build_url(
+            &self.hsm_url,
+            "/install",
+            &[
+                ("targetId", &target),
+                ("perso", perso),
+                ("firmware", firmware),
+                ("firmwareKey", firmware_key),
+            ],
+        );
+        match hsm::run(device.transport(), &url, on_event).await {
+            Ok(_) | Err(Error::Disconnected) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Whether [`Self::install_final_firmware`] is needed after the OS updater
     /// (and MCU): devices whose final firmware has its own image (Nano S).
     pub fn needs_final_install(update: &FirmwareUpdate) -> bool {

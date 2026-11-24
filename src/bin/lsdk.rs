@@ -556,6 +556,18 @@ enum ScreensaverCmd {
     Reset,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DownloadStep {
+    /// Only the OS updater (OSU) image.
+    Osu,
+    /// Only the final firmware image.
+    Final,
+    /// OSU then final (the device must report the matching state for each;
+    /// the final step reuses the same key file, so its get_version should be
+    /// the post-OSU report).
+    Both,
+}
+
 #[derive(Subcommand)]
 enum FirmwareCmd {
     /// Check whether an update is available.
@@ -586,6 +598,26 @@ enum FirmwareCmd {
         /// Print the full data as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Download (capture) firmware from the vendor HSM without flashing,
+    /// using an emulated device from a dumped SE key. Writes the OSU and (if
+    /// present) the final-firmware APDU streams, plus the update plan, into a
+    /// directory. The device's reported version selects which update the
+    /// catalog offers, so set `[device] get_version` in the key file to match
+    /// the step (e.g. a 1.3.1 report yields the 1.3.1->1.4.2 OSU).
+    Download {
+        /// Dumped SE key file to emulate the device from.
+        #[arg(long)]
+        device_key: std::path::PathBuf,
+        /// OS updater to use instead of the latest (e.g. 1.4.2-osu-hidden).
+        #[arg(long)]
+        osu: Option<String>,
+        /// Which components to fetch.
+        #[arg(long, value_enum, default_value_t = DownloadStep::Osu)]
+        step: DownloadStep,
+        /// Directory to write the captured streams and plan into.
+        #[arg(long)]
+        out: std::path::PathBuf,
     },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair {
@@ -950,17 +982,19 @@ mod apdu_log {
     }
 }
 
-/// The transport `open` picked: USB HID, or TCP with `--tcp`.
+/// The transport `open` picked: USB HID, TCP with `--tcp`, or a virtual
+/// device emulated from a dumped SE key with `--device-key`.
 enum Link {
     Hid(HidTransport),
     Tcp(TcpTransport),
+    Keyfile(Box<lsdk::transport::keyfile::KeyFileTransport>),
 }
 
 impl Link {
     fn product(&self) -> Option<String> {
         match self {
             Link::Hid(t) => t.info().product.clone(),
-            Link::Tcp(_) => None,
+            Link::Tcp(_) | Link::Keyfile(_) => None,
         }
     }
 
@@ -980,6 +1014,7 @@ impl lsdk::Transport for Link {
         let r = match self {
             Link::Hid(t) => t.exchange(apdu).await,
             Link::Tcp(t) => t.exchange(apdu).await,
+            Link::Keyfile(t) => t.exchange(apdu).await,
         };
         if logged {
             apdu_log::reply(&r, start.elapsed());
@@ -1006,6 +1041,14 @@ async fn run_offline_genuine<T: lsdk::Transport>(
         }
     })
     .await
+}
+
+/// Build a virtual device from a dumped SE key file (for `--device-key`),
+/// going through [`Link`] so `--log` capture works the same as for hardware.
+fn open_device_key(path: &std::path::Path) -> Result<Device<Link>> {
+    let t = lsdk::transport::keyfile::KeyFileTransport::open(path)?;
+    apdu_log::note(format_args!("emulating a device from {}", path.display()));
+    Ok(Device::new(Link::Keyfile(Box::new(t))))
 }
 
 fn open(cli: &Cli) -> Result<Device<Link>> {
@@ -1545,9 +1588,8 @@ async fn run(cli: Cli) -> Result<()> {
             }
             let root = root_key(key.as_ref())?;
             let att = if let Some(path) = device_key {
-                let dev = Device::new(lsdk::transport::keyfile::KeyFileTransport::open(path)?);
                 eprintln!("> emulating a device from {}", path.display());
-                run_offline_genuine(&dev, &root, &issuers).await?
+                run_offline_genuine(&open_device_key(path)?, &root, &issuers).await?
             } else {
                 run_offline_genuine(&open(&cli)?, &root, &issuers).await?
             };
@@ -1573,8 +1615,7 @@ async fn run(cli: Cli) -> Result<()> {
         } => {
             // Online check against an emulated device (through the vendor HSM).
             eprintln!("> emulating a device from {} (contacting the vendor HSM)", path.display());
-            let dev = Device::new(lsdk::transport::keyfile::KeyFileTransport::open(path)?);
-            let ok = manager.genuine_check(&dev, &mut progress).await?;
+            let ok = manager.genuine_check(&open_device_key(path)?, &mut progress).await?;
             println!("{}", if ok { "genuine" } else { "NOT GENUINE" });
             if ok {
                 eprintln!("note: {GENUINE_NOTE}");
@@ -2154,6 +2195,80 @@ async fn run(cli: Cli) -> Result<()> {
                 print_firmware_paths(&p);
             }
         }
+        Cmd::Firmware {
+            cmd:
+                FirmwareCmd::Download {
+                    device_key,
+                    osu,
+                    step,
+                    out,
+                },
+        } => {
+            std::fs::create_dir_all(out)
+                .map_err(|e| Error::App(format!("{}: {e}", out.display())))?;
+            let dev = open_device_key(device_key)?;
+            let os = dev.get_version().await?;
+            let update = manager
+                .firmware_update_via(&os, osu.as_deref())
+                .await?
+                .ok_or_else(|| Error::App(format!("no update offered for {}", os.se_version)))?;
+            std::fs::write(
+                out.join("plan.json"),
+                serde_json::to_string_pretty(&update).unwrap_or_default(),
+            )
+            .map_err(|e| Error::App(format!("{e}")))?;
+            eprintln!(
+                "> plan: OSU {} ({}), final {} ({})",
+                update.osu.name,
+                update.osu.firmware,
+                update.final_firmware.name,
+                update.final_firmware.firmware.as_deref().unwrap_or("none"),
+            );
+
+            let want_osu = matches!(step, DownloadStep::Osu | DownloadStep::Both);
+            let want_final = matches!(step, DownloadStep::Final | DownloadStep::Both);
+
+            if want_osu {
+                let log = out.join("osu.log");
+                apdu_log::start(&log)?;
+                apdu_log::note(format_args!("download OSU {}", update.osu.firmware));
+                eprintln!("> downloading OSU -> {}", log.display());
+                manager
+                    .install_component(
+                        &dev,
+                        os.target_id,
+                        &update.osu.perso,
+                        &update.osu.firmware,
+                        &update.osu.firmware_key,
+                        &mut progress,
+                    )
+                    .await?;
+                eprintln!("> OSU captured to {}", log.display());
+            }
+            if want_final {
+                match (&update.final_firmware.firmware, &update.final_firmware.firmware_key) {
+                    (Some(fw), Some(key)) => {
+                        let log = out.join("final.log");
+                        apdu_log::start(&log)?;
+                        apdu_log::note(format_args!("download final {fw}"));
+                        eprintln!("> downloading final firmware -> {}", log.display());
+                        manager
+                            .install_component(
+                                &dev,
+                                os.target_id,
+                                &update.final_firmware.perso,
+                                fw,
+                                key,
+                                &mut progress,
+                            )
+                            .await?;
+                        eprintln!("> final firmware captured to {}", log.display());
+                    }
+                    _ => eprintln!("> final firmware has no separate image to download"),
+                }
+            }
+            return Ok(());
+        }
         Cmd::Firmware { cmd } => {
             if let FirmwareCmd::Update { log: Some(p), .. } | FirmwareCmd::Repair { log: Some(p) } =
                 cmd
@@ -2200,7 +2315,8 @@ async fn run(cli: Cli) -> Result<()> {
                 (
                     FirmwareCmd::Repair { .. }
                     | FirmwareCmd::Hash { .. }
-                    | FirmwareCmd::Paths { .. },
+                    | FirmwareCmd::Paths { .. }
+                    | FirmwareCmd::Download { .. },
                     _,
                 ) => {
                     unreachable!()

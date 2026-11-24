@@ -274,14 +274,15 @@ impl KeyFileTransport {
             .ok_or_else(|| Error::Transport("secure command before the channel is open".into()))?;
         let plain = session.open(data)?;
         let cmd = plain.first().copied().unwrap_or(0);
+        if std::env::var_os("LSDK_DEBUG").is_some() {
+            eprintln!(
+                "keyfile: secure command 0x{cmd:02x} data={}",
+                hex::encode(&plain[1.min(plain.len())..])
+            );
+        }
         let reply = match cmd {
             ins::GET_VERSION => self.version_payload(),
-            other => {
-                if std::env::var_os("LSDK_DEBUG").is_some() {
-                    eprintln!("keyfile: unhandled secure command 0x{other:02x}");
-                }
-                Vec::new()
-            }
+            _ => Vec::new(),
         };
         let sealed = session.seal(&reply);
         Ok(ok(sealed))
