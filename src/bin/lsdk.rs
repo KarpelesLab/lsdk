@@ -598,6 +598,13 @@ enum FirmwareCmd {
         /// timestamped, across reconnects) and the update steps to this file.
         #[arg(long)]
         log: Option<std::path::PathBuf>,
+        /// Skip the MCU flash even when the target firmware does not list the
+        /// installed MCU. For an MCU newer than the target supports, whose
+        /// bootloader cannot be downgraded (e.g. MCU 1.7 with the 1.4.2 OS
+        /// updater). The final firmware then runs with the current MCU: the
+        /// device may not work until updated further. Use at your own risk.
+        #[arg(long)]
+        skip_mcu: bool,
     },
     /// List the update paths from the installed firmware (OSUs, with the
     /// catalog's script names, hashes and sizes).
@@ -2593,7 +2600,16 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 (_, None) => println!("firmware {} is up to date", os.se_version),
                 (FirmwareCmd::Check { .. }, Some(u)) => print(&u),
-                (FirmwareCmd::Update { .. }, Some(u)) => {
+                (FirmwareCmd::Update { skip_mcu, .. }, Some(mut u)) => {
+                    if *skip_mcu && u.should_flash_mcu {
+                        eprintln!(
+                            "> --skip-mcu: keeping MCU {} although {} lists MCU ids {:?}",
+                            os.mcu_version(),
+                            u.final_firmware.name,
+                            u.final_firmware.mcu_versions
+                        );
+                        u.should_flash_mcu = false;
+                    }
                     eprintln!(
                         "updating {} -> {} (OSU {}, id {})",
                         os.se_version, u.final_firmware.name, u.osu.name, u.osu.id
