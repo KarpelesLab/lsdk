@@ -191,6 +191,19 @@ enum Cmd {
     },
     /// Send a raw APDU (hex).
     Apdu { hex: String },
+    /// Expose the device on a TCP port in Speculos's APDU protocol, so tools
+    /// made for Speculos (`--tcp`, ledgerblue, hw-transport-node-speculos...)
+    /// can use real hardware. One client at a time; the device is reopened
+    /// when it re-enumerates (an app opened or closed).
+    Serve {
+        /// Address to listen on. Anything that can connect can drive the
+        /// device: keep it on loopback unless the network is trusted.
+        #[arg(long, default_value = "127.0.0.1:9999")]
+        listen: String,
+        /// Log every exchange (hex APDUs and responses) to this file.
+        #[arg(long)]
+        log: Option<std::path::PathBuf>,
+    },
     /// Ethereum app.
     Eth {
         #[command(subcommand)]
@@ -1183,6 +1196,74 @@ fn reopen(cli: &Cli, wait: Duration) -> Result<Device<Link>> {
             Err(_) => std::thread::sleep(Duration::from_millis(500)),
         }
     }
+}
+
+/// `lsdk serve`: answer Speculos-protocol clients on `listen` with the device.
+async fn serve(cli: &Cli, listen: &str) -> Result<()> {
+    let listener = std::net::TcpListener::bind(listen)
+        .map_err(|e| Error::Transport(format!("{listen}: {e}")))?;
+    let local = listener
+        .local_addr()
+        .map_err(|e| Error::Transport(e.to_string()))?;
+    // Opened up front so a missing device shows now, not at the first client.
+    let mut dev = Some(open(cli)?);
+    eprintln!("> serving the device on {local} (Speculos APDU protocol), ctrl-c to stop");
+    if !local.ip().is_loopback() {
+        eprintln!(
+            "> warning: {local} is reachable from the network, and anyone who connects can drive the device"
+        );
+    }
+    for conn in listener.incoming() {
+        let stream = match conn {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("> accept: {e}");
+                continue;
+            }
+        };
+        let peer = stream
+            .peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "?".into());
+        let _ = stream.set_nodelay(true);
+        eprintln!("> {peer} connected");
+        apdu_log::note(format_args!("serve: {peer} connected"));
+        let r = lsdk::transport::tcp::serve(stream, async |apdu: &[u8]| {
+            let d = match &dev {
+                Some(d) => d,
+                None => dev.insert(reopen(cli, Duration::from_secs(10))?),
+            };
+            match d.exchange_raw(apdu).await {
+                // The device went away, most likely re-enumerating after an
+                // app was opened or closed: the APDU did not get through, so
+                // reopen it and send it again.
+                Err(e @ (Error::Disconnected | Error::Transport(_))) => {
+                    dev = None;
+                    eprintln!("> device lost ({e}), reopening...");
+                    let d = dev.insert(reopen(cli, Duration::from_secs(10))?);
+                    d.exchange_raw(apdu).await
+                }
+                r => r,
+            }
+        })
+        .await;
+        match r {
+            Ok(()) => eprintln!("> {peer} disconnected"),
+            Err(e) => {
+                eprintln!("> {peer} dropped: {e}");
+                // Reopen on the next client rather than reuse a device in
+                // an unknown state.
+                if matches!(
+                    e,
+                    Error::Disconnected | Error::Transport(_) | Error::NoDevice
+                ) {
+                    dev = None;
+                }
+            }
+        }
+        apdu_log::note(format_args!("serve: {peer} gone"));
+    }
+    Ok(())
 }
 
 /// Unlock a HW.1 with --pin, refusing to burn the last attempt blindly.
@@ -2725,6 +2806,12 @@ async fn run(cli: Cli) -> Result<()> {
             let raw = hex::decode(hex.replace(' ', ""))
                 .map_err(|e| Error::InvalidInput(e.to_string()))?;
             println!("{}", hex::encode(open(&cli)?.exchange_raw(&raw).await?));
+        }
+        Cmd::Serve { listen, log } => {
+            if let Some(p) = log {
+                apdu_log::start(p)?;
+            }
+            serve(&cli, listen).await?;
         }
         Cmd::Eth { cmd } => {
             let d = open(&cli)?;

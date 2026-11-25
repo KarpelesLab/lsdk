@@ -149,7 +149,14 @@ lsdk eth address --display
 lsdk eth sign-tx --nonce 0 --to 0x... --value 0.01 --max-fee 30
 lsdk btc address --kind taproot --display
 lsdk sol transfer --to ... --amount 0.1 --blockhash ...
+lsdk serve                    # put the device on 127.0.0.1:9999 (Speculos APDU protocol)
+lsdk --tcp 127.0.0.1:9999 info   # any command can talk to Speculos (or `lsdk serve`) instead of USB
 ```
+
+`lsdk serve` lets tools written for Speculos drive real hardware: one client
+at a time, `--listen` to change the address, and `--log` to record the
+exchanges. It reopens the device when it re-enumerates (an app is opened or
+closed).
 
 > **Vendor endorsement (`endorse setup --vendor`)** runs the vendor HSM's
 > `/endorse` script (as `endorsementSetupLedger2.py` does). It did not work
