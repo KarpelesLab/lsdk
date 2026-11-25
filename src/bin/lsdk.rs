@@ -640,6 +640,15 @@ enum FirmwareCmd {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Rebuild a `.fw` command stream from a decrypted session log (the
+    /// `.log` written by `firmware download --device-key`). Offline.
+    FromLog {
+        /// Decrypted session log.
+        log: std::path::PathBuf,
+        /// Output file (default: the log path with a `.fw` extension).
+        #[arg(long, short)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair {
         /// Append every APDU exchanged with the device to this file (as
@@ -2279,6 +2288,28 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Firmware {
+            cmd: FirmwareCmd::FromLog { log, out },
+        } => {
+            let text = std::fs::read_to_string(log)
+                .map_err(|e| Error::App(format!("{}: {e}", log.display())))?;
+            let cmds = lsdk::scp::parse_decrypted_log(&text)?;
+            if cmds.is_empty() {
+                return Err(Error::App(format!(
+                    "{}: no decrypted secure commands (`cmd` lines) in this log",
+                    log.display()
+                )));
+            }
+            let out = out.clone().unwrap_or_else(|| log.with_extension("fw"));
+            std::fs::write(&out, lsdk::scp::format_stream(&cmds))
+                .map_err(|e| Error::App(format!("{}: {e}", out.display())))?;
+            eprintln!(
+                "> {} -> {} ({} commands)",
+                log.display(),
+                out.display(),
+                cmds.len()
+            );
+        }
+        Cmd::Firmware {
             cmd:
                 FirmwareCmd::Download {
                     device_key,
@@ -2473,7 +2504,8 @@ async fn run(cli: Cli) -> Result<()> {
                     FirmwareCmd::Repair { .. }
                     | FirmwareCmd::Hash { .. }
                     | FirmwareCmd::Paths { .. }
-                    | FirmwareCmd::Download { .. },
+                    | FirmwareCmd::Download { .. }
+                    | FirmwareCmd::FromLog { .. },
                     _,
                 ) => {
                     unreachable!()

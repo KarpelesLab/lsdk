@@ -371,7 +371,7 @@ impl KeyFileTransport {
         if cmds.is_empty() {
             return None;
         }
-        Some(format_stream(&cmds))
+        Some(crate::scp::format_stream(&cmds))
     }
 
     /// Take the session trace (wire APDUs, decrypted secure commands, and the
@@ -385,25 +385,6 @@ impl KeyFileTransport {
             Some(lines.join("\n") + "\n")
         }
     }
-}
-
-/// Render secure commands as the text stream format (see
-/// [`KeyFileTransport::take_firmware_stream`]).
-#[cfg(feature = "scp")]
-fn format_stream(cmds: &[(u8, Vec<u8>)]) -> String {
-    let mut out = String::new();
-    for (ins, args) in cmds {
-        match crate::scp::ins::name(*ins) {
-            Some(n) => out.push_str(n),
-            None => out.push_str(&format!("CMD_{ins:02X}")),
-        }
-        if !args.is_empty() {
-            out.push(' ');
-            out.push_str(&hex::encode(args));
-        }
-        out.push('\n');
-    }
-    out
 }
 
 impl Transport for KeyFileTransport {
@@ -580,22 +561,6 @@ mod tests {
         .unwrap();
         assert_eq!(version.target_id, 0x3110_0004);
         assert_eq!(version.raw_version, "1.6.1");
-    }
-
-    #[cfg(feature = "scp")]
-    #[test]
-    fn stream_format() {
-        use crate::scp::ins;
-        let cmds = vec![
-            (ins::SET_LOAD_OFFSET, vec![0, 0, 0xec, 0]),
-            (ins::LOAD, vec![0, 0x10, 0xaa, 0xbb]),
-            (ins::FLUSH, vec![]),
-            (0x42, vec![1]),
-        ];
-        assert_eq!(
-            format_stream(&cmds),
-            "SET_LOAD_OFFSET 0000ec00\nLOAD 0010aabb\nFLUSH\nCMD_42 01\n"
-        );
     }
 
     #[test]

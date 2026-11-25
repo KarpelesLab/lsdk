@@ -87,6 +87,52 @@ pub mod ins {
 
 pub use crate::attestation::RootKey;
 
+/// Render secure commands as the `.fw` text stream: one command per line, in
+/// stream order, as `NAME <arguments as hex>` (`NAME` alone when it has no
+/// arguments; `CMD_xx` for an unknown instruction), e.g.
+/// `SET_LOAD_OFFSET 0000ec00`, `LOAD 0000<data>` (2-byte BE in-region
+/// offset, then the bytes).
+pub fn format_stream(cmds: &[(u8, Vec<u8>)]) -> String {
+    let mut out = String::new();
+    for (ins, args) in cmds {
+        match ins::name(*ins) {
+            Some(n) => out.push_str(n),
+            None => out.push_str(&format!("CMD_{ins:02X}")),
+        }
+        if !args.is_empty() {
+            out.push(' ');
+            out.push_str(&hex::encode(args));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Extract the decrypted secure commands from a session log written by the
+/// emulated device (`firmware download --device-key`): its `  cmd <ins>
+/// <args hex>` lines, in order. Other lines are ignored.
+pub fn parse_decrypted_log(text: &str) -> Result<Vec<(u8, Vec<u8>)>> {
+    let mut cmds = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let Some(rest) = line.trim().strip_prefix("cmd ") else {
+            continue;
+        };
+        let bad = |what: &str| Error::InvalidInput(format!("log line {}: {what}", n + 1));
+        let mut it = rest.split_whitespace();
+        let ins = it.next().ok_or_else(|| bad("missing instruction"))?;
+        let ins = u8::from_str_radix(ins, 16).map_err(|_| bad("bad instruction"))?;
+        let args = match it.next() {
+            Some(h) => hex::decode(h).map_err(|_| bad("bad argument hex"))?,
+            None => Vec::new(),
+        };
+        if it.next().is_some() {
+            return Err(bad("trailing data"));
+        }
+        cmds.push((ins, args));
+    }
+    Ok(cmds)
+}
+
 /// Owner certificate for an endorsement key: DER signature by `owner` over
 /// `sha256(0xFE || endorsement_public_key)`.
 pub fn endorsement_certificate(owner: &RootKey, endorsement_public_key: &[u8]) -> Result<Vec<u8>> {
@@ -891,6 +937,26 @@ impl<'d, T: Transport> SecureChannel<'d, T> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stream_format_and_log_parse() {
+        let log = "> e0000000ee00\n  cmd 05 0000ec00\n  rsp \n< 9000\n  cmd 06 0010aabb\n  cmd 07 \n  cmd 42 01\n";
+        let cmds = parse_decrypted_log(log).unwrap();
+        assert_eq!(
+            cmds,
+            vec![
+                (ins::SET_LOAD_OFFSET, vec![0, 0, 0xec, 0]),
+                (ins::LOAD, vec![0, 0x10, 0xaa, 0xbb]),
+                (ins::FLUSH, vec![]),
+                (0x42, vec![1]),
+            ]
+        );
+        assert_eq!(
+            format_stream(&cmds),
+            "SET_LOAD_OFFSET 0000ec00\nLOAD 0010aabb\nFLUSH\nCMD_42 01\n"
+        );
+    }
+
     use super::*;
 
     #[test]
