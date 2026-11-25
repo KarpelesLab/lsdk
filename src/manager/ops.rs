@@ -790,7 +790,20 @@ impl Manager {
             .take(3)
             .collect::<Vec<_>>()
             .join(".");
-        let is_mcu = os.maj_min() == bootloader_version;
+        // Compare numerically: bootloaders report "0.6" for "0.6.0".
+        let have = crate::model::parse_version(&os.maj_min());
+        let need = crate::model::parse_version(&bootloader_version);
+        if have > need {
+            // Bootloaders do not roll back: flashing the older one is a no-op
+            // and the update would loop on it.
+            return Err(Error::App(format!(
+                "firmware {} needs MCU {} (from bootloader {bootloader_version}), but this device has bootloader {}, which cannot be downgraded: install a firmware that supports the current MCU instead",
+                final_firmware.name,
+                mcu.name,
+                os.maj_min()
+            )));
+        }
+        let is_mcu = have == need;
         let version = if is_mcu {
             mcu.name.clone()
         } else {
