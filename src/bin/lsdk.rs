@@ -1091,17 +1091,30 @@ fn open_device_key(path: &std::path::Path) -> Result<Device<Link>> {
     Ok(Device::new(Link::Keyfile(Box::new(t))))
 }
 
-/// Write the emulated device's secure command stream (if any) to `path`: one
-/// `NAME <args hex>` line per command, in stream order.
-fn write_firmware(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
+/// Write the emulated device's secure command stream (if any): one
+/// `NAME <args hex>` line per command, in stream order. It always goes to
+/// `<path>~` first and is renamed to `path` only when `complete` (the
+/// download finished successfully), so a `.fw` is never a partial stream.
+fn write_firmware(dev: &Device<Link>, path: &std::path::Path, complete: bool) -> Result<()> {
     let Some(text) = dev.transport().take_firmware_stream() else {
         return Ok(());
     };
-    std::fs::write(path, &text).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push("~");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, &text).map_err(|e| Error::App(format!("{}: {e}", tmp.display())))?;
+    let dst = if complete {
+        std::fs::rename(&tmp, path)
+            .map_err(|e| Error::App(format!("{} -> {}: {e}", tmp.display(), path.display())))?;
+        path
+    } else {
+        &tmp
+    };
     eprintln!(
-        "> firmware -> {} ({} commands)",
-        path.display(),
-        text.lines().count()
+        "> firmware -> {} ({} commands{})",
+        dst.display(),
+        text.lines().count(),
+        if complete { "" } else { ", incomplete" }
     );
     Ok(())
 }
@@ -2323,7 +2336,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let r = manager
                     .install_component(&dev, tid, perso, fw, key, &mut progress)
                     .await;
-                write_firmware(&dev, &out.join(format!("{base}.fw")))?;
+                write_firmware(&dev, &out.join(format!("{base}.fw")), r.is_ok())?;
                 write_log(&dev, &log)?;
                 eprintln!("> stream captured to {}", log.display());
                 r?;
@@ -2357,7 +2370,7 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 apdu_log::note(format_args!("download OSU {}", update.osu.firmware));
                 eprintln!("> downloading OSU -> {}", log.display());
-                manager
+                let r = manager
                     .install_component(
                         &dev,
                         os.target_id,
@@ -2366,9 +2379,10 @@ async fn run(cli: Cli) -> Result<()> {
                         &update.osu.firmware_key,
                         &mut progress,
                     )
-                    .await?;
-                write_firmware(&dev, &out.join("osu.fw"))?;
+                    .await;
+                write_firmware(&dev, &out.join("osu.fw"), r.is_ok())?;
                 write_log(&dev, &log)?;
+                r?;
                 eprintln!("> OSU captured to {}", log.display());
             }
             if want_final {
@@ -2392,7 +2406,7 @@ async fn run(cli: Cli) -> Result<()> {
                         }
                         apdu_log::note(format_args!("download final {fw}"));
                         eprintln!("> downloading final firmware -> {}", log.display());
-                        manager
+                        let r = manager
                             .install_component(
                                 &dev,
                                 os.target_id,
@@ -2401,9 +2415,10 @@ async fn run(cli: Cli) -> Result<()> {
                                 key,
                                 &mut progress,
                             )
-                            .await?;
-                        write_firmware(&dev, &out.join("final.fw"))?;
+                            .await;
+                        write_firmware(&dev, &out.join("final.fw"), r.is_ok())?;
                         write_log(&dev, &log)?;
+                        r?;
                         eprintln!("> final firmware captured to {}", log.display());
                     }
                     _ => eprintln!("> final firmware has no separate image to download"),
