@@ -858,6 +858,23 @@ impl Manager {
             .await
     }
 
+    /// Flash a given MCU or bootloader `version` from bootloader mode, with
+    /// no compatibility check (unlike [`Self::flash_mcu`]): for recovery and
+    /// experiments. A wrong bootloader can leave the device unrecoverable.
+    pub async fn flash_mcu_version<T: Transport>(
+        &self,
+        device: &Device<T>,
+        version: &str,
+        kind: FlashKind,
+        on_event: &mut dyn FnMut(HsmEvent),
+    ) -> Result<FlashKind> {
+        let os = device.get_version().await?;
+        if !os.is_bootloader {
+            return Err(Error::App("device is not in bootloader mode".into()));
+        }
+        self.install_mcu(device, &os, version, kind, on_event).await
+    }
+
     /// Flash an MCU or bootloader `version` through the vendor HSM.
     async fn install_mcu<T: Transport>(
         &self,

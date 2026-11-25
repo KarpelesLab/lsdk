@@ -669,6 +669,19 @@ enum FirmwareCmd {
         #[arg(long, short)]
         out: Option<std::path::PathBuf>,
     },
+    /// Flash a given MCU (or with --bootloader, bootloader) version from
+    /// bootloader mode, with no compatibility check: e.g. an MCU downgrade.
+    /// A wrong bootloader can leave the device unrecoverable.
+    Mcu {
+        /// Version as the vendor HSM names it (e.g. 1.5, or 0.6 with --bootloader).
+        version: String,
+        /// Flash a bootloader instead of an MCU firmware.
+        #[arg(long)]
+        bootloader: bool,
+        /// Append every APDU exchanged with the device to this file.
+        #[arg(long)]
+        log: Option<std::path::PathBuf>,
+    },
     /// Device stuck in bootloader mode: flash the MCU its firmware needs.
     Repair {
         /// Append every APDU exchanged with the device to this file (as
@@ -2376,6 +2389,56 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Firmware {
+            cmd:
+                FirmwareCmd::Mcu {
+                    version,
+                    bootloader,
+                    log,
+                },
+        } => {
+            if let Some(p) = log {
+                apdu_log::start(p)?;
+            }
+            let d = open(&cli)?;
+            let os = d.get_version().await?;
+            if !os.is_bootloader {
+                return Err(Error::App(
+                    "the device must be in bootloader mode (hold the left button while plugging it in)".into(),
+                ));
+            }
+            let kind = if *bootloader {
+                lsdk::manager::ops::FlashKind::Bootloader
+            } else {
+                lsdk::manager::ops::FlashKind::Mcu
+            };
+            eprintln!("> bootloader {}: flashing {kind:?} {version}", os.maj_min());
+            apdu_log::note(format_args!(
+                "step: flash {kind:?} {version} from bootloader {}",
+                os.maj_min()
+            ));
+            manager
+                .flash_mcu_version(&d, version, kind, &mut progress)
+                .await?;
+            drop(d);
+            eprintln!("> flashed, waiting for the device to restart...");
+            std::thread::sleep(Duration::from_secs(5));
+            let d = reopen(&cli, Duration::from_secs(120))?;
+            let os = d.get_version().await?;
+            println!(
+                "device: {}{} (MCU {}, bootloader {})",
+                os.raw_version,
+                if os.is_bootloader {
+                    " [bootloader]"
+                } else if os.is_osu {
+                    " [OS updater]"
+                } else {
+                    ""
+                },
+                os.mcu_seph_version,
+                os.mcu_bootloader_version
+            );
+        }
+        Cmd::Firmware {
             cmd: FirmwareCmd::FromLog { log, out },
         } => {
             let text = std::fs::read_to_string(log)
@@ -2593,7 +2656,8 @@ async fn run(cli: Cli) -> Result<()> {
                     | FirmwareCmd::Hash { .. }
                     | FirmwareCmd::Paths { .. }
                     | FirmwareCmd::Download { .. }
-                    | FirmwareCmd::FromLog { .. },
+                    | FirmwareCmd::FromLog { .. }
+                    | FirmwareCmd::Mcu { .. },
                     _,
                 ) => {
                     unreachable!()
