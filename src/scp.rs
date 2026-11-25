@@ -56,6 +56,33 @@ pub mod ins {
     pub const RECOVER_SET_CA: u8 = 0xd2;
     /// Recover channel only.
     pub const RECOVER_DELETE_CA: u8 = 0xd3;
+
+    /// Symbolic name of a secure instruction, `None` if unknown.
+    pub fn name(ins: u8) -> Option<&'static str> {
+        Some(match ins {
+            SET_LOAD_OFFSET => "SET_LOAD_OFFSET",
+            LOAD => "LOAD",
+            FLUSH => "FLUSH",
+            CRC => "CRC",
+            COMMIT => "COMMIT",
+            CREATE_APP => "CREATE_APP",
+            DELETE_APP => "DELETE_APP",
+            LIST_APPS => "LIST_APPS",
+            LIST_APPS_CONTINUE => "LIST_APPS_CONTINUE",
+            GET_VERSION => "GET_VERSION",
+            GET_MEMORY_INFORMATION => "GET_MEMORY_INFORMATION",
+            SETUP_CUSTOM_CERTIFICATE => "SETUP_CUSTOM_CERTIFICATE",
+            RESET_CUSTOM_CERTIFICATE => "RESET_CUSTOM_CERTIFICATE",
+            DELETE_ALL_APPS => "DELETE_ALL_APPS",
+            DELETE_APP_BY_HASH => "DELETE_APP_BY_HASH",
+            RESET_ENDORSEMENT => "RESET_ENDORSEMENT",
+            HASH_FIRMWARE => "HASH_FIRMWARE",
+            MCU_BOOTLOADER => "MCU_BOOTLOADER",
+            RECOVER_SET_CA => "RECOVER_SET_CA",
+            RECOVER_DELETE_CA => "RECOVER_DELETE_CA",
+            _ => return None,
+        })
+    }
 }
 
 pub use crate::attestation::RootKey;

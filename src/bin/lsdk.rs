@@ -1024,12 +1024,12 @@ impl Link {
         matches!(self, Link::Hid(t) if t.info().legacy)
     }
 
-    /// Firmware reconstructed from a secure LOAD stream (emulated device only)
-    /// as Intel HEX, cleared for the next component. `None` for real transports
+    /// Secure command stream (SET_LOAD_OFFSET, LOAD, CRC, ...) captured by the
+    /// emulated device, as text, cleared for the next component. `None` for real transports
     /// or when nothing was loaded.
-    fn take_firmware_ihex(&self) -> Option<String> {
+    fn take_firmware_stream(&self) -> Option<String> {
         match self {
-            Link::Keyfile(t) => t.take_firmware_ihex(),
+            Link::Keyfile(t) => t.take_firmware_stream(),
             _ => None,
         }
     }
@@ -1091,17 +1091,17 @@ fn open_device_key(path: &std::path::Path) -> Result<Device<Link>> {
     Ok(Device::new(Link::Keyfile(Box::new(t))))
 }
 
-/// Write the firmware reconstructed from the emulated device's secure LOAD
-/// stream (if any) to `path`, as Intel HEX (addresses preserved).
+/// Write the emulated device's secure command stream (if any) to `path`: one
+/// `NAME <args hex>` line per command, in stream order.
 fn write_firmware(dev: &Device<Link>, path: &std::path::Path) -> Result<()> {
-    let Some(hex) = dev.transport().take_firmware_ihex() else {
+    let Some(text) = dev.transport().take_firmware_stream() else {
         return Ok(());
     };
-    std::fs::write(path, &hex).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
+    std::fs::write(path, &text).map_err(|e| Error::App(format!("{}: {e}", path.display())))?;
     eprintln!(
-        "> firmware -> {} ({} records)",
+        "> firmware -> {} ({} commands)",
         path.display(),
-        hex.lines().count()
+        text.lines().count()
     );
     Ok(())
 }
@@ -2323,7 +2323,7 @@ async fn run(cli: Cli) -> Result<()> {
                 let r = manager
                     .install_component(&dev, tid, perso, fw, key, &mut progress)
                     .await;
-                write_firmware(&dev, &out.join(format!("{base}.hex")))?;
+                write_firmware(&dev, &out.join(format!("{base}.fw")))?;
                 write_log(&dev, &log)?;
                 eprintln!("> stream captured to {}", log.display());
                 r?;
@@ -2367,7 +2367,7 @@ async fn run(cli: Cli) -> Result<()> {
                         &mut progress,
                     )
                     .await?;
-                write_firmware(&dev, &out.join("osu.hex"))?;
+                write_firmware(&dev, &out.join("osu.fw"))?;
                 write_log(&dev, &log)?;
                 eprintln!("> OSU captured to {}", log.display());
             }
@@ -2402,7 +2402,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 &mut progress,
                             )
                             .await?;
-                        write_firmware(&dev, &out.join("final.hex"))?;
+                        write_firmware(&dev, &out.join("final.fw"))?;
                         write_log(&dev, &log)?;
                         eprintln!("> final firmware captured to {}", log.display());
                     }

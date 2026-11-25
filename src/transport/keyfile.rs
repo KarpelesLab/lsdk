@@ -81,12 +81,11 @@ struct State {
     /// The opened secure channel, after `E053` (scp feature only).
     #[cfg(feature = "scp")]
     session: Option<crate::scp::Session>,
-    /// Firmware written by the secure LOAD commands (online install/download),
-    /// as (absolute offset, bytes) segments; the image is sparse, so it is
-    /// emitted as Intel HEX rather than a zero-filled flat image.
-    fw_segments: Vec<(u32, Vec<u8>)>,
-    /// Current region base, from SET_LOAD_OFFSET.
-    fw_offset: usize,
+    /// Every decrypted secure command of the session (online
+    /// install/download), in stream order, as (instruction, arguments).
+    /// Kept verbatim so the load stream (SET_LOAD_OFFSET switches, LOAD
+    /// chunks, CRCs, ...) can be written out exactly.
+    fw_cmds: Vec<(u8, Vec<u8>)>,
 }
 
 impl KeyFileTransport {
@@ -335,6 +334,7 @@ impl KeyFileTransport {
         let cmd = plain.first().copied().unwrap_or(0);
         let args = &plain[1.min(plain.len())..];
         self.log(format!("  cmd {cmd:02x} {}", hex::encode(args)));
+        st.fw_cmds.push((cmd, args.to_vec()));
         let reply = match cmd {
             ins::GET_VERSION => self.version_payload(),
             // No apps installed: every slot reads back erased (all 0xff). The
@@ -342,25 +342,6 @@ impl KeyFileTransport {
             // stops at the model's slot count, so return an erased slot each
             // time it asks.
             ins::LIST_APPS | ins::LIST_APPS_CONTINUE => vec![0xff; 64],
-            // Reconstruct the firmware from the load stream. SET_LOAD_OFFSET
-            // gives the region's byte base; each LOAD is
-            // [in-region offset: 2 BE][data], written at base + offset.
-            ins::SET_LOAD_OFFSET => {
-                if let Some(b) = args.get(..4) {
-                    st.fw_offset = u32::from_be_bytes(b.try_into().unwrap()) as usize;
-                }
-                Vec::new()
-            }
-            ins::LOAD => {
-                let (rel, data) = if args.len() >= 2 {
-                    (u16::from_be_bytes([args[0], args[1]]) as usize, &args[2..])
-                } else {
-                    (0, args)
-                };
-                let off = (st.fw_offset + rel) as u32;
-                st.fw_segments.push((off, data.to_vec()));
-                Vec::new()
-            }
             _ => Vec::new(),
         };
         self.log(format!("  rsp {}", hex::encode(&reply)));
@@ -378,18 +359,19 @@ impl KeyFileTransport {
         }
     }
 
-    /// Take the firmware captured from the secure LOAD stream so far as an
-    /// Intel HEX string (addresses preserved, gaps left out), clearing it for
-    /// the next component. `None` if nothing was loaded.
+    /// Take the secure command stream captured so far as text, clearing it
+    /// for the next component: one command per line, in stream order, as
+    /// `NAME <arguments as hex>` (`NAME` alone when it has no arguments;
+    /// `CMD_xx` for an unknown instruction). E.g. `SET_LOAD_OFFSET 0000ec00`,
+    /// `LOAD 0000<data>` (2-byte BE in-region offset, then the bytes).
+    /// `None` if no secure command was sent.
     #[cfg(feature = "scp")]
-    pub fn take_firmware_ihex(&self) -> Option<String> {
-        let mut st = self.state.borrow_mut();
-        st.fw_offset = 0;
-        let segs = std::mem::take(&mut st.fw_segments);
-        if segs.is_empty() {
+    pub fn take_firmware_stream(&self) -> Option<String> {
+        let cmds = std::mem::take(&mut self.state.borrow_mut().fw_cmds);
+        if cmds.is_empty() {
             return None;
         }
-        Some(to_ihex(&segs))
+        Some(format_stream(&cmds))
     }
 
     /// Take the session trace (wire APDUs, decrypted secure commands, and the
@@ -405,64 +387,22 @@ impl KeyFileTransport {
     }
 }
 
-/// Render (offset, bytes) segments as an Intel HEX file: 16-byte data records,
-/// type-04 extended-linear-address records when the upper 16 bits change, and
-/// an EOF record. Overlapping/out-of-order writes resolve last-writer-wins.
+/// Render secure commands as the text stream format (see
+/// [`KeyFileTransport::take_firmware_stream`]).
 #[cfg(feature = "scp")]
-fn to_ihex(segments: &[(u32, Vec<u8>)]) -> String {
-    use std::collections::BTreeMap;
-    fn emit(out: &mut String, addr: u16, kind: u8, data: &[u8]) {
-        let mut sum = (data.len() as u8)
-            .wrapping_add((addr >> 8) as u8)
-            .wrapping_add(addr as u8)
-            .wrapping_add(kind);
-        for b in data {
-            sum = sum.wrapping_add(*b);
-        }
-        out.push_str(&format!(":{:02X}{:04X}{:02X}", data.len(), addr, kind));
-        for b in data {
-            out.push_str(&format!("{b:02X}"));
-        }
-        out.push_str(&format!("{:02X}\n", (!sum).wrapping_add(1)));
-    }
-    let mut map: BTreeMap<u32, u8> = BTreeMap::new();
-    for (off, data) in segments {
-        for (i, b) in data.iter().enumerate() {
-            map.insert(off + i as u32, *b);
-        }
-    }
+fn format_stream(cmds: &[(u8, Vec<u8>)]) -> String {
     let mut out = String::new();
-    let mut upper: Option<u16> = None;
-    let mut run: Vec<u8> = Vec::new();
-    let mut run_addr = 0u32;
-    let mut next: Option<u32> = None;
-    for (&addr, &b) in &map {
-        // Flush the current run on a gap, a 64 KiB page change, or 16 bytes.
-        let breaks = !run.is_empty()
-            && (next != Some(addr) || (run_addr >> 16) != (addr >> 16) || run.len() >= 16);
-        if breaks {
-            let hi = (run_addr >> 16) as u16;
-            if upper != Some(hi) {
-                emit(&mut out, 0, 0x04, &hi.to_be_bytes());
-                upper = Some(hi);
-            }
-            emit(&mut out, run_addr as u16, 0x00, &run);
-            run.clear();
+    for (ins, args) in cmds {
+        match crate::scp::ins::name(*ins) {
+            Some(n) => out.push_str(n),
+            None => out.push_str(&format!("CMD_{ins:02X}")),
         }
-        if run.is_empty() {
-            run_addr = addr;
+        if !args.is_empty() {
+            out.push(' ');
+            out.push_str(&hex::encode(args));
         }
-        run.push(b);
-        next = Some(addr + 1);
+        out.push('\n');
     }
-    if !run.is_empty() {
-        let hi = (run_addr >> 16) as u16;
-        if upper != Some(hi) {
-            emit(&mut out, 0, 0x04, &hi.to_be_bytes());
-        }
-        emit(&mut out, run_addr as u16, 0x00, &run);
-    }
-    out.push_str(":00000001FF\n");
     out
 }
 
@@ -644,34 +584,18 @@ mod tests {
 
     #[cfg(feature = "scp")]
     #[test]
-    fn ihex_sparse_regions() {
-        // Two segments across a gap and a 64 KiB boundary.
-        let segs = vec![
-            (0x0000u32, vec![0xaa, 0xbb, 0xcc]),
-            (0x1_0002u32, vec![0x11, 0x22]),
+    fn stream_format() {
+        use crate::scp::ins;
+        let cmds = vec![
+            (ins::SET_LOAD_OFFSET, vec![0, 0, 0xec, 0]),
+            (ins::LOAD, vec![0, 0x10, 0xaa, 0xbb]),
+            (ins::FLUSH, vec![]),
+            (0x42, vec![1]),
         ];
-        let hex = to_ihex(&segs);
-        let lines: Vec<&str> = hex.lines().collect();
-        // Every record: valid length, and checksum sums to 0 mod 256.
-        for l in &lines {
-            let bytes = hex::decode(&l[1..]).unwrap();
-            assert_eq!(bytes[0] as usize, bytes.len() - 5, "length byte");
-            assert_eq!(
-                bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)),
-                0,
-                "checksum"
-            );
-        }
-        // First data record carries the low segment, and there is an
-        // extended-linear-address (type 04) record for the 0x0001_xxxx page.
-        assert!(lines.iter().any(|l| l.starts_with(":03000000AABBCC")));
-        assert!(lines.iter().any(|l| l.starts_with(":020000040001")));
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.starts_with(":0200020011 22".replace(' ', "").as_str()))
+        assert_eq!(
+            format_stream(&cmds),
+            "SET_LOAD_OFFSET 0000ec00\nLOAD 0010aabb\nFLUSH\nCMD_42 01\n"
         );
-        assert_eq!(*lines.last().unwrap(), ":00000001FF");
     }
 
     #[test]
