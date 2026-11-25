@@ -2,10 +2,12 @@
 // Shown on any tab when the connected device is in bootloader mode (an
 // interrupted or ongoing firmware update): offers to finish it right away.
 import { ref, computed } from 'vue'
-import { state, finishBootloaderUpdate, errorText, connect, ENTER_BOOTLOADER } from '../lib/store.js'
+import { state, finishBootloaderUpdate, errorText, connect, ENTER_BOOTLOADER, RESTART_OS } from '../lib/store.js'
 
 const running = ref(false)
 const done = ref(false)
+// The device restarted in bootloader mode again: its OS cannot start.
+const stuck = ref(false)
 const error = ref(null)
 
 const v = computed(() => state.info?.version)
@@ -16,18 +18,20 @@ const visible = computed(
   () => running.value || done.value || (inBootloader.value && !state.bootloaderDismissed && !handledElsewhere.value),
 )
 const phaseText = computed(() => {
+  if (state.fwPhase === 'restartOs') return `${RESTART_OS}.`
   if (state.fwPhase === 'enterBootloader') return `${ENTER_BOOTLOADER}.`
   if (state.fwPhase === 'reboot' || state.reconnecting) return 'Waiting for the device to restart…'
   if (state.busy) return state.busy
   return 'Working…'
 })
 
-async function repair() {
+async function repair(force = false) {
   error.value = null
   running.value = true
   try {
-    await finishBootloaderUpdate()
-    done.value = true
+    const r = await finishBootloaderUpdate({ force })
+    stuck.value = r === 'stuck'
+    done.value = r === 'done'
   } catch (e) {
     error.value = errorText(e)
   } finally {
@@ -43,6 +47,7 @@ async function pick() {
 function close() {
   if (running.value) return
   done.value = false
+  stuck.value = false
   error.value = null
   if (inBootloader.value) state.bootloaderDismissed = true
 }
@@ -60,8 +65,16 @@ function close() {
         <h2 id="bl-title">Finish the firmware update</h2>
         <p>
           Your {{ state.info?.model || 'device' }} is in <b>bootloader mode</b>: a firmware update
-          (<span class="mono">{{ v?.seVersion || 'unknown' }}</span>) is waiting for its MCU to be updated.
-          This takes a minute; keep the device plugged in.
+          (<span class="mono">{{ v?.seVersion || 'unknown' }}</span>) may be waiting for its MCU to be updated.
+        </p>
+        <p v-if="!stuck && !running">
+          The bootloader does not tell which MCU the firmware needs, so nothing is flashed from here.
+          Click <b>Restart device</b>, then <b>{{ RESTART_OS.toLowerCase() }}</b>: the firmware reports
+          its MCU and the update continues from there.
+        </p>
+        <p v-if="stuck" class="note">
+          The device restarted in bootloader mode again: its OS cannot start without an MCU update.
+          <b>Flash MCU</b> installs the MCU this bootloader supports; check the activity log for the version first.
         </p>
         <div v-if="running" class="progress">
           <div class="row">
@@ -79,7 +92,8 @@ function close() {
         <div class="row">
           <button v-if="!running" @click="close">Later</button>
           <div class="spacer"></div>
-          <button class="primary" :disabled="running || !!state.busy" @click="repair">{{ error ? 'Retry' : 'Finish update' }}</button>
+          <button v-if="stuck" :disabled="running || !!state.busy" @click="repair(true)">Flash MCU</button>
+          <button class="primary" :disabled="running || !!state.busy" @click="repair(false)">{{ error || stuck ? 'Restart again' : 'Restart device' }}</button>
         </div>
       </template>
     </div>

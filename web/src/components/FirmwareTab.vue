@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { state, run, hsmEvent, log, errorText, waitDevice, flashWhileBootloader, finishBootloaderUpdate, finishFirmwareUpdate, needsFinalInstall, ENTER_BOOTLOADER } from '../lib/store.js'
+import { state, run, hsmEvent, log, errorText, waitDevice, flashWhileBootloader, finishBootloaderUpdate, finishFirmwareUpdate, needsFinalInstall, ENTER_BOOTLOADER, RESTART_OS } from '../lib/store.js'
 import { renderMarkdown } from '../lib/markdown.js'
 
 const error = ref(null)
@@ -45,7 +45,11 @@ const start = () => guard(async () => {
   log('ok', `firmware is now ${state.info?.version?.seVersion ?? state.info?.app?.version ?? 'updated'}`)
 })
 
-const finish = () => guard(finishBootloaderUpdate)
+// The device restarted in bootloader mode again: its OS cannot start.
+const stuck = ref(false)
+const finish = (force = false) => guard(async () => {
+  stuck.value = (await finishBootloaderUpdate({ force })) === 'stuck'
+})
 </script>
 
 <template>
@@ -67,11 +71,17 @@ const finish = () => guard(finishBootloaderUpdate)
       <div class="row">
         <div>
           <h2>Device in bootloader mode</h2>
-          <p class="muted small-text" style="margin:0">A firmware update is in progress (installed firmware <span class="mono">{{ v.seVersion || '?' }}</span>, bootloader <span class="mono">{{ v.mcuBootloaderVersion }}</span>). Flash the MCU to finish it.</p>
+          <p class="muted small-text" style="margin:0">A firmware update may be in progress (installed firmware <span class="mono">{{ v.seVersion || '?' }}</span>, bootloader <span class="mono">{{ v.mcuBootloaderVersion }}</span>). The bootloader does not tell which MCU the firmware needs: restart the device into its OS first.</p>
         </div>
         <div class="spacer"></div>
-        <button class="primary" :disabled="!!state.busy" @click="finish">Finish update</button>
+        <button v-if="stuck" :disabled="!!state.busy" @click="finish(true)">Flash MCU</button>
+        <button class="primary" :disabled="!!state.busy" @click="finish(false)">{{ stuck ? 'Restart again' : 'Restart device' }}</button>
       </div>
+      <p v-if="stuck" class="note">The device restarted in bootloader mode again: its OS cannot start without an MCU update. <b>Flash MCU</b> installs the MCU this bootloader supports.</p>
+    </div>
+
+    <div v-if="phase === 'restartOs'" class="panel">
+      <p class="note" style="margin:0"><b>{{ RESTART_OS }}.</b> If the page does not pick it up, click <b>Select device</b> in the header and pick it.</p>
     </div>
 
     <div v-if="v?.isOsu && !phase && update === undefined" class="panel">

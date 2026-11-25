@@ -337,12 +337,30 @@ export async function finishFirmwareUpdate(u) {
   }
 }
 
-// Finish an interrupted update (device found in bootloader mode).
-export async function finishBootloaderUpdate() {
+export const RESTART_OS = 'Unplug the device and plug it back in without touching its buttons'
+
+// Device found in bootloader mode (page load, interrupted update): the
+// bootloader cannot tell which MCU the firmware needs (old ones do not even
+// report the SE firmware), so nothing is flashed from there. With `force`
+// false, ask for a normal restart and plan from the MCU the OS reports;
+// returns 'stuck' when the device comes back in bootloader mode (its OS
+// cannot start). With `force`, flash what the bootloader itself asks for
+// (only once a restart showed the OS cannot start), then continue.
+export async function finishBootloaderUpdate({ force = false } = {}) {
   try {
-    await flashWhileBootloader()
-    // Nano S: the repair brings it back to the OS updater ("Update"); the
-    // update goes on from there.
+    if (force) {
+      await flashWhileBootloader()
+    } else {
+      log('info', `the device is in bootloader mode: ${RESTART_OS}, to read which MCU its firmware needs`)
+      await waitDevice('restartOs', 15 * 60000, { goneTimeout: 15 * 60000 })
+      if (state.info?.version?.isBootloader) {
+        log('warn', 'the device restarted in bootloader mode again: its OS cannot start')
+        state.fwPhase = null
+        return 'stuck'
+      }
+    }
+    // Nano S: back in the OS updater ("Update"); the update goes on from
+    // there, planned from the MCU the device reports now.
     if (state.info?.version?.isOsu) {
       const u = await run('check firmware', (d) => d.checkFirmware())
       if (u) {
@@ -352,6 +370,7 @@ export async function finishBootloaderUpdate() {
     }
     state.fwPhase = 'done'
     log('ok', `firmware is now ${state.info?.version?.seVersion ?? state.info?.app?.version ?? 'updated'}`)
+    return 'done'
   } catch (e) {
     state.fwPhase = null
     throw e
