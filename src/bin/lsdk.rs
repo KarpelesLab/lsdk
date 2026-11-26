@@ -395,7 +395,9 @@ enum RecoverCmd {
 
 #[derive(Subcommand)]
 enum FactoryCmd {
-    /// FACTORY_TEST with raw P1, P2 and data (hex).
+    /// FACTORY_TEST (E0 44) with P1, P2 and data (hex). P1 is hex or one of:
+    /// start-stop, screen, button, battery, se-serial, reset, serial,
+    /// backup-serial, mcu-serial.
     Test {
         p1: String,
         #[arg(default_value = "0")]
@@ -405,8 +407,18 @@ enum FactoryCmd {
     },
     /// GET_DEVICE_PUBLIC_KEY (personalization).
     PublicKey,
-    /// GET_CXPORT.
+    /// GET_CXPORT (E0 C5).
     Cxport,
+    /// SET_CXPORT (E0 C4) with a raw payload (hex). Factory personalization write.
+    SetCxport { data: String },
+    /// SET_CERTIFICATE (E0 41) with a raw payload (hex). Factory personalization
+    /// write, likely one-shot.
+    SetCertificate {
+        data: String,
+        /// P2 (hex).
+        #[arg(long, default_value = "0")]
+        p2: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2152,13 +2164,31 @@ async fn run(cli: Cli) -> Result<()> {
                 u8::from_str_radix(s.trim_start_matches("0x"), 16)
                     .map_err(|e| Error::InvalidInput(e.to_string()))
             };
+            let hexarg =
+                |s: &str| hex::decode(s.trim()).map_err(|e| Error::InvalidInput(e.to_string()));
             let out = match cmd {
                 FactoryCmd::Test { p1, p2, data } => {
-                    let data = hex::decode(data).map_err(|e| Error::InvalidInput(e.to_string()))?;
-                    d.factory_test(num(p1)?, num(p2)?, &data).await?
+                    use lsdk::os::factory as f;
+                    let p1 = match p1.as_str() {
+                        "start-stop" => f::START_STOP,
+                        "screen" => f::SCREEN,
+                        "button" => f::BUTTON,
+                        "battery" => f::BATTERY,
+                        "se-serial" => f::GET_SE_SERIAL,
+                        "reset" => f::RESET,
+                        "serial" => f::SERIAL_NUMBER,
+                        "backup-serial" => f::BACKUP_SERIAL_NUMBER,
+                        "mcu-serial" => f::MCU_SERIAL_NUMBER,
+                        other => num(other)?,
+                    };
+                    d.factory_test(p1, num(p2)?, &hexarg(data)?).await?
                 }
                 FactoryCmd::PublicKey => d.factory_get_device_public_key().await?,
                 FactoryCmd::Cxport => d.factory_get_cxport().await?,
+                FactoryCmd::SetCxport { data } => d.factory_set_cxport(&hexarg(data)?).await?,
+                FactoryCmd::SetCertificate { data, p2 } => {
+                    d.factory_set_certificate(num(p2)?, &hexarg(data)?).await?
+                }
             };
             println!("{}", hex::encode(out));
         }
