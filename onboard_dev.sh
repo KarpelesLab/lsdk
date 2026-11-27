@@ -10,9 +10,11 @@ set -eu
 
 cd "$(dirname "$0")"
 
+export CARGO_TARGET_DIR=/tmp/cargo-target-lsdk
+
 WORDS="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
 
-time cargo run -q --release --features cli --bin lsdk -- \
+time cargo run --release --features cli --bin lsdk -- \
     onboard --pin 1111 --words "$WORDS" --i-understand-the-seed-travels-over-usb "$@"
 sleep 15
 cargo run -q --release --features cli --bin lsdk -- ca install
