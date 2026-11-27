@@ -395,15 +395,70 @@ enum RecoverCmd {
 
 #[derive(Subcommand)]
 enum FactoryCmd {
-    /// FACTORY_TEST (E0 44) with P1, P2 and data (hex). P1 is hex or one of:
-    /// start-stop, screen, button, battery, se-serial, reset, serial,
-    /// backup-serial, mcu-serial.
+    /// FACTORY_TEST (E0 44), raw: P1, P2 and data in hex. P1 may also be one
+    /// of the sub-test names below (start-stop, screen, ...). Prefer the named
+    /// subcommands, which check their arguments.
     Test {
         p1: String,
         #[arg(default_value = "0")]
         p2: String,
         #[arg(default_value = "")]
         data: String,
+    },
+    /// Factory test UX start / stop (FACTORY_TEST P1=00, P2=<param>). The
+    /// device boots its "FACTORY TEST" screen with param 1.
+    StartStop {
+        /// Parameter passed to the factory UX (hex).
+        #[arg(default_value = "1")]
+        param: String,
+    },
+    /// Screen test (FACTORY_TEST P1=10).
+    Screen {
+        #[command(subcommand)]
+        cmd: FactoryScreenCmd,
+    },
+    /// Read the button state (FACTORY_TEST P1=20).
+    Button,
+    /// Read one battery metric (FACTORY_TEST P1=30, P2=<metric>).
+    Battery {
+        /// percentage, voltage, temperature, current, flags, or a hex P2.
+        #[arg(default_value = "percentage")]
+        metric: String,
+    },
+    /// Secure element serial, 7 bytes (FACTORY_TEST P1=D0).
+    SeSerial,
+    /// MCU unique id, 12 bytes (FACTORY_TEST P1=F2).
+    McuSerial,
+    /// Reset the secure element (FACTORY_TEST P1=E0).
+    Reset,
+    /// Read the device serial number (FACTORY_TEST P1=F0, P2=01), or write it
+    /// with --set (P2=00). Writing is one-shot: once a serial is set the
+    /// device leaves factory test for good and resets.
+    Serial {
+        /// Serial number to write (ASCII).
+        #[arg(long)]
+        set: Option<String>,
+        /// Serial number to write, as hex bytes.
+        #[arg(long, conflicts_with = "set")]
+        set_hex: Option<String>,
+    },
+    /// Read the backup serial number (FACTORY_TEST P1=F1, P2=01), or write it
+    /// with --set (P2=00; stored as '%' + serial, which the OS still treats as
+    /// "no serial number").
+    ///
+    /// Reading it while no serial is stored corrupts the 2.2.x dashboard
+    /// (length underflow in its memmove: 6F00, then every APDU fails until a
+    /// reset), so the read is refused in that case unless --force.
+    BackupSerial {
+        /// Backup serial number to write (ASCII).
+        #[arg(long)]
+        set: Option<String>,
+        /// Backup serial number to write, as hex bytes.
+        #[arg(long, conflicts_with = "set")]
+        set_hex: Option<String>,
+        /// Read even when no serial is stored.
+        #[arg(long)]
+        force: bool,
     },
     /// GET_DEVICE_PUBLIC_KEY (personalization).
     PublicKey,
@@ -418,6 +473,25 @@ enum FactoryCmd {
         /// P2 (hex).
         #[arg(long, default_value = "0")]
         p2: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FactoryScreenCmd {
+    /// Screen on (P2=01).
+    On,
+    /// Screen off (P2=00).
+    Off,
+    /// Set the brightness (P2=10, one data byte).
+    Brightness { level: u8 },
+    /// Draw a raw bitmap (P2=20): x, y, width, height, then the pixel data
+    /// (hex), at most 247 bytes.
+    Bitmap {
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        data: String,
     },
 }
 
@@ -2159,6 +2233,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Factory { cmd } => {
+            use lsdk::os::factory as f;
             let d = open(&cli)?;
             let num = |s: &str| {
                 u8::from_str_radix(s.trim_start_matches("0x"), 16)
@@ -2166,9 +2241,25 @@ async fn run(cli: Cli) -> Result<()> {
             };
             let hexarg =
                 |s: &str| hex::decode(s.trim()).map_err(|e| Error::InvalidInput(e.to_string()));
-            let out = match cmd {
+            let serial_arg = |set: &Option<String>, set_hex: &Option<String>| -> Result<_> {
+                Ok(match (set, set_hex) {
+                    (Some(s), _) => Some(s.as_bytes().to_vec()),
+                    (_, Some(h)) => Some(hexarg(h)?),
+                    _ => None,
+                })
+            };
+            // Printed as hex, plus the ASCII form when it is printable.
+            let show_serial = |b: &[u8]| {
+                if b.is_empty() {
+                    println!("(none)");
+                } else if b.iter().all(|c| c.is_ascii_graphic()) {
+                    println!("{} ({})", hex::encode(b), String::from_utf8_lossy(b));
+                } else {
+                    println!("{}", hex::encode(b));
+                }
+            };
+            match cmd {
                 FactoryCmd::Test { p1, p2, data } => {
-                    use lsdk::os::factory as f;
                     let p1 = match p1.as_str() {
                         "start-stop" => f::START_STOP,
                         "screen" => f::SCREEN,
@@ -2181,16 +2272,114 @@ async fn run(cli: Cli) -> Result<()> {
                         "mcu-serial" => f::MCU_SERIAL_NUMBER,
                         other => num(other)?,
                     };
-                    d.factory_test(p1, num(p2)?, &hexarg(data)?).await?
+                    let out = d.factory_test(p1, num(p2)?, &hexarg(data)?).await?;
+                    println!("{}", hex::encode(out));
                 }
-                FactoryCmd::PublicKey => d.factory_get_device_public_key().await?,
-                FactoryCmd::Cxport => d.factory_get_cxport().await?,
-                FactoryCmd::SetCxport { data } => d.factory_set_cxport(&hexarg(data)?).await?,
+                FactoryCmd::StartStop { param } => {
+                    d.factory_test(f::START_STOP, num(param)?, &[]).await?;
+                    println!("ok");
+                }
+                FactoryCmd::Screen { cmd } => {
+                    let (p2, data) = match cmd {
+                        FactoryScreenCmd::On => (0x01, vec![]),
+                        FactoryScreenCmd::Off => (0x00, vec![]),
+                        FactoryScreenCmd::Brightness { level } => (0x10, vec![*level]),
+                        FactoryScreenCmd::Bitmap {
+                            x,
+                            y,
+                            width,
+                            height,
+                            data,
+                        } => {
+                            let mut v = Vec::new();
+                            for n in [x, y, width, height] {
+                                v.extend_from_slice(&n.to_be_bytes());
+                            }
+                            v.extend_from_slice(&hexarg(data)?);
+                            if v.len() > 255 {
+                                return Err(Error::InvalidInput(
+                                    "bitmap data too long (247 bytes max)".into(),
+                                ));
+                            }
+                            (0x20, v)
+                        }
+                    };
+                    d.factory_test(f::SCREEN, p2, &data).await?;
+                    println!("ok");
+                }
+                FactoryCmd::Button => {
+                    println!("{}", hex::encode(d.factory_test(f::BUTTON, 0, &[]).await?));
+                }
+                FactoryCmd::Battery { metric } => {
+                    let p2 = match metric.as_str() {
+                        "percentage" => 0,
+                        "voltage" => 1,
+                        "temperature" => 2,
+                        "current" => 3,
+                        "flags" => 4,
+                        other => num(other)?,
+                    };
+                    let out = d.factory_test(f::BATTERY, p2, &[]).await?;
+                    println!("{}", hex::encode(out));
+                }
+                FactoryCmd::SeSerial => {
+                    let out = d.factory_test(f::GET_SE_SERIAL, 0, &[]).await?;
+                    println!("{}", hex::encode(out));
+                }
+                FactoryCmd::McuSerial => {
+                    let out = d.factory_test(f::MCU_SERIAL_NUMBER, 0, &[]).await?;
+                    println!("{}", hex::encode(out));
+                }
+                FactoryCmd::Reset => {
+                    d.factory_test(f::RESET, 0, &[]).await?;
+                    println!("ok");
+                }
+                FactoryCmd::Serial { set, set_hex } => match serial_arg(set, set_hex)? {
+                    Some(sn) => {
+                        let out = d.factory_test(f::SERIAL_NUMBER, 0x00, &sn).await?;
+                        show_serial(&out);
+                    }
+                    None => show_serial(&d.factory_test(f::SERIAL_NUMBER, 0x01, &[]).await?),
+                },
+                FactoryCmd::BackupSerial {
+                    set,
+                    set_hex,
+                    force,
+                } => match serial_arg(set, set_hex)? {
+                    Some(sn) => {
+                        let out = d.factory_test(f::BACKUP_SERIAL_NUMBER, 0x00, &sn).await?;
+                        show_serial(&out);
+                    }
+                    None => {
+                        if !force
+                            && d.factory_test(f::SERIAL_NUMBER, 0x01, &[])
+                                .await?
+                                .is_empty()
+                        {
+                            return Err(Error::InvalidInput(
+                                "no serial number stored: reading the backup serial now \
+                                 corrupts the dashboard until reset (--force to send it anyway)"
+                                    .into(),
+                            ));
+                        }
+                        show_serial(&d.factory_test(f::BACKUP_SERIAL_NUMBER, 0x01, &[]).await?);
+                    }
+                },
+                FactoryCmd::PublicKey => {
+                    println!("{}", hex::encode(d.factory_get_device_public_key().await?))
+                }
+                FactoryCmd::Cxport => println!("{}", hex::encode(d.factory_get_cxport().await?)),
+                FactoryCmd::SetCxport { data } => {
+                    println!(
+                        "{}",
+                        hex::encode(d.factory_set_cxport(&hexarg(data)?).await?)
+                    )
+                }
                 FactoryCmd::SetCertificate { data, p2 } => {
-                    d.factory_set_certificate(num(p2)?, &hexarg(data)?).await?
+                    let out = d.factory_set_certificate(num(p2)?, &hexarg(data)?).await?;
+                    println!("{}", hex::encode(out));
                 }
-            };
-            println!("{}", hex::encode(out));
+            }
         }
         Cmd::Ca { cmd } => {
             match cmd {
