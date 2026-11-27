@@ -746,6 +746,18 @@ enum FirmwareCmd {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Version compatibility table from the manager API, as CSV: one line
+    /// per (device, final firmware, accepted MCU, MCU's bootloader). No
+    /// device needed.
+    Table {
+        /// Only firmwares and MCUs distributed to this provider (1 = public
+        /// releases). Default: every provider.
+        #[arg(long)]
+        provider: Option<u32>,
+        /// Write to this file instead of stdout.
+        #[arg(long, short)]
+        out: Option<std::path::PathBuf>,
+    },
     /// Rebuild a `.fw` command stream from a decrypted session log (the
     /// `.log` written by `firmware download --device-key`). Offline.
     FromLog {
@@ -2658,6 +2670,26 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
         Cmd::Firmware {
+            cmd: FirmwareCmd::Table { provider, out },
+        } => {
+            let rows = manager.version_table(*provider).await?;
+            let mut csv = String::from("device,version,mcu,bootloader\n");
+            for r in &rows {
+                csv.push_str(&format!(
+                    "{},{},{},{}\n",
+                    r.device, r.version, r.mcu, r.bootloader
+                ));
+            }
+            match out {
+                Some(p) => {
+                    std::fs::write(p, csv)
+                        .map_err(|e| Error::App(format!("{}: {e}", p.display())))?;
+                    eprintln!("> {} relations written to {}", rows.len(), p.display());
+                }
+                None => print!("{csv}"),
+            }
+        }
+        Cmd::Firmware {
             cmd: FirmwareCmd::FromLog { log, out },
         } => {
             let text = std::fs::read_to_string(log)
@@ -2876,6 +2908,7 @@ async fn run(cli: Cli) -> Result<()> {
                     | FirmwareCmd::Paths { .. }
                     | FirmwareCmd::Download { .. }
                     | FirmwareCmd::FromLog { .. }
+                    | FirmwareCmd::Table { .. }
                     | FirmwareCmd::Mcu { .. },
                     _,
                 ) => {

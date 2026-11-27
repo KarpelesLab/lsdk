@@ -444,6 +444,11 @@ impl ManagerApi {
         self.get("/firmware_final_versions", &[]).await
     }
 
+    /// All device versions (hardware families and revisions).
+    pub async fn get_device_versions(&self) -> Result<Vec<DeviceVersion>> {
+        self.get("/device_versions", &[]).await
+    }
+
     /// All MCU versions.
     pub async fn get_mcu_versions(&self) -> Result<Vec<McuVersion>> {
         self.get("/mcu_versions", &[]).await

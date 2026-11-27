@@ -938,3 +938,79 @@ impl Manager {
         Ok(())
     }
 }
+
+/// One compatibility relation from the catalog: a final firmware accepts this
+/// MCU, which pairs with this bootloader (empty when the catalog names none).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct VersionRelation {
+    pub device: String,
+    pub version: String,
+    pub mcu: String,
+    pub bootloader: String,
+}
+
+/// Short device name for a catalog device version: the model id (`nanox`,
+/// `nanosp`, `stax`, `flex`, `apexp`) when the target id is a known model,
+/// except the Nano S whose hardware revisions take different MCUs; else the
+/// catalog name, lowercased without spaces (`nanos-1.5`, `blue_2hw15`).
+fn device_slug(dv: &DeviceVersion) -> String {
+    let model = dv
+        .target_id
+        .as_deref()
+        .and_then(|t| t.parse::<u32>().ok())
+        .and_then(crate::model::DeviceModel::from_target_id);
+    match model {
+        Some(m) if m != crate::model::DeviceModel::NanoS => m.id().to_ascii_lowercase(),
+        _ => dv.name.to_ascii_lowercase().replace(' ', ""),
+    }
+}
+
+impl Manager {
+    /// Every (device, final firmware, MCU, bootloader) relation in the
+    /// catalog, sorted and deduplicated. With `provider`, only final
+    /// firmwares and MCUs distributed to it.
+    pub async fn version_table(&self, provider: Option<u32>) -> Result<Vec<VersionRelation>> {
+        let devices = self.api.get_device_versions().await?;
+        let finals = self.api.get_firmware_catalog().await?;
+        let mcus = self.api.get_mcu_versions().await?;
+        let for_provider = |p: &[u32]| provider.is_none_or(|x| p.contains(&x));
+        let mut rows = Vec::new();
+        for f in finals.iter().filter(|f| for_provider(&f.providers)) {
+            let version = f.version.clone().unwrap_or_else(|| f.name.clone());
+            for dv in devices.iter().filter(|d| f.device_versions.contains(&d.id)) {
+                for m in mcus.iter().filter(|m| {
+                    f.mcu_versions.contains(&m.id)
+                        && for_provider(&m.providers)
+                        && (m.device_versions.is_empty() || m.device_versions.contains(&dv.id))
+                }) {
+                    // Placeholders ("none", "rien", "") mean no bootloader pairing.
+                    let bl = &m.from_bootloader_version;
+                    let bootloader = if bl.starts_with(|c: char| c.is_ascii_digit()) {
+                        bl.clone()
+                    } else {
+                        String::new()
+                    };
+                    rows.push(VersionRelation {
+                        device: device_slug(dv),
+                        version: version.clone(),
+                        mcu: m.name.clone(),
+                        bootloader,
+                    });
+                }
+            }
+        }
+        let key = |r: &VersionRelation| {
+            (
+                r.device.clone(),
+                crate::model::parse_version(&r.version),
+                r.version.clone(),
+                crate::model::parse_version(&r.mcu),
+                r.mcu.clone(),
+                r.bootloader.clone(),
+            )
+        };
+        rows.sort_by_key(key);
+        rows.dedup();
+        Ok(rows)
+    }
+}
