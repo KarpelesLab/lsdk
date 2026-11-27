@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/KarpelesLab/lsdk/compare/v0.3.0...v0.4.0) - 2026-11-27
+
+### Other
+
+- one subcommand per FACTORY_TEST sub-test, guard backup-serial read
+- small change in onboard_dev.sh
+- add set-cxport and set-certificate, named FACTORY_TEST sub-tests
+- firmware mcu <version> [--bootloader]: flash a given MCU or bootloader from bootloader mode
+- device found in bootloader mode restarts into its OS before anything is flashed
+- firmware update --skip-mcu: install the final firmware without flashing the MCU
+- compare bootloader versions numerically, refuse a bootloader downgrade
+- expose a device over TCP in Speculos's APDU protocol
+- firmware from-log: rebuild a .fw command stream from a decrypted session log
+- firmware download: write the stream to .fw~, rename to .fw only on success
+- firmware download: write the secure command stream (.fw) instead of Intel HEX
+
 ## [0.3.0](https://github.com/KarpelesLab/lsdk/compare/v0.2.0...v0.3.0) - 2026-11-24
 
 ### Fixed
